@@ -33,7 +33,7 @@
 
 ## 6. Session store
 
-- [ ] 6.1 Move session store to `~/.baish/sessions.db` (single DB). Update `SessionStore::open()` to use home directory path. Add migration for existing per-session DB files. Add unit tests: DB is created at correct path, multiple sessions share same DB.
+- [ ] 6.1 Move session store to `~/.baish/sessions.db` (single DB). Update `SessionStore::open()` to use home directory path. Add unit tests: DB is created at correct path, multiple sessions share same DB.
 - [ ] 6.2 Update `PluginContext` to include `session_id` for cache access. Plugins access cache through context, not directly. Add unit tests: context is passed correctly, cache operations work through context.
 
 ## 7. Cat plugin with Lua override example

@@ -85,29 +85,35 @@ machete:
     fi
 
 # CRAP complexity — generates coverage then scores; fails if any function exceeds threshold 30.
-# Uses --features integration so the coverage matches what CI produces (cargo:test artifact).
-# --missing skip: functions absent from lcov (gateway.rs, registry.rs, session.rs, main.rs
-# are excluded via --ignore-filename-regex) are skipped rather than penalised as 0%.
+# Outputs JSON, filters with jq to show only functions above threshold.
 crap:
     #!/usr/bin/env bash
-    # Run offline unit tests only — no integration or e2e features.
-    # (Integration tests require a live gateway; use just test-e2e-gateway for those.)
-    if output=$(cargo llvm-cov --workspace \
-        --lcov --output-path /tmp/lcov-crap.info \
+    set -o pipefail
+    LCOV=/tmp/lcov-crap.info
+    if ! cargo llvm-cov --workspace \
+        --lcov --output-path "$LCOV" \
         --ignore-filename-regex 'main\.rs' \
-        --bins --tests --quiet 2>/dev/null); then
-        if output=$(cargo crap --workspace --lcov /tmp/lcov-crap.info \
-            --threshold 30 \
-            --exclude 'tests/**' --exclude 'src/**/main.rs' \
-            --missing skip --fail-above 2>/dev/null); then
-            echo "✓ crap passed"
-        else
-            printf '%s\n' "$output"
-            exit 1
-        fi
-    else
-        printf '%s\n' "$output"
+        --bins --tests --quiet 2>/dev/null; then
         exit 1
+    fi
+
+    json=$(cargo crap --workspace --lcov "$LCOV" \
+        --threshold 30 \
+        --exclude 'tests/**' --exclude 'src/**/main.rs' \
+        --missing skip --format json 2>/dev/null)
+    code=$?
+
+    # Filter functions with CRAP > 30 using jq
+    crappy=$(echo "$json" | jq '[.entries[] | select(.crap > 30)]' 2>/dev/null)
+    count=$(echo "$crappy" | jq 'length' 2>/dev/null)
+    count=${count:-0}
+
+    if [ "$count" -gt 0 ] 2>/dev/null; then
+        echo "✗ $count function(s) exceed CRAP threshold 30:"
+        echo "$crappy" | jq -r '.[] | "  CRAP=\(.crap | floor)  cyclomatic=\(.cyclomatic | floor)  coverage=\(.coverage | floor)%  \(.function)  \(.file):\(.line)"'
+        exit 1
+    else
+        echo "✓ crap passed"
     fi
 
 
