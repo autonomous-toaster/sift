@@ -1,0 +1,38 @@
+[package]
+name = "baish"
+version = "0.1.0"
+edition = "2021"
+description = "AI-optimized shell — minimal POSIX shell with plugin-based command optimization"
+license = "MIT"
+repository = "https://github.com/autonomous-toaster/baish"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
+nursery = "deny"
+
+[dependencies]
+async-trait = "0.1"
+brush-parser = "0.4"
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+os_pipe = "1"
+sha2 = "0.10"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+chrono = "0.4"
+hex = "0.4"
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
