@@ -39,6 +39,61 @@ fn find_real_bash() -> PathBuf {
     PathBuf::from("/bin/bash")
 }
 
+/// Execute a command via PTY and return `(output_string, exit_code)`.
+fn exec_command(cmd: &str, session_id: &str, cmd_count: u64) -> Result<(String, i32), mlua::Error> {
+    let (output_str, exit_code) = run_pty(cmd)?;
+    save_output(cmd, session_id, cmd_count, &output_str);
+    Ok((output_str, exit_code))
+}
+
+/// Run a command in a PTY and return the output and exit code.
+fn run_pty(cmd: &str) -> Result<(String, i32), mlua::Error> {
+    let bash_path = find_real_bash();
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system
+        .openpty(portable_pty::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| mlua::Error::external(format!("pty: {e}")))?;
+    let cmd_builder = portable_pty::CommandBuilder::new(&bash_path);
+    let mut child = pair.slave.spawn_command(cmd_builder)
+        .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
+    let mut writer = pair.master.take_writer()
+        .map_err(|e| mlua::Error::external(format!("writer: {e}")))?;
+    let full_cmd = format!("{cmd}; exit $?\n");
+    let _ = writer.write_all(full_cmd.as_bytes());
+    let _ = writer.flush();
+    drop(writer);
+    let mut reader = pair.master.try_clone_reader()
+        .map_err(|e| mlua::Error::external(format!("reader: {e}")))?;
+    let mut output = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => output.extend_from_slice(&buf[..n]),
+        }
+    }
+    let exit_code = child.wait()
+        .map_or(1, |s| s.exit_code().cast_signed());
+    let output_str = String::from_utf8_lossy(&output).to_string();
+    Ok((output_str, exit_code))
+}
+
+/// Save raw output to a temp file.
+fn save_output(cmd: &str, session_id: &str, cmd_count: u64, output: &str) {
+    let slug: String = cmd.chars()
+        .take(40)
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .collect();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let tmp_dir = std::path::PathBuf::from("/tmp/sift").join(session_id);
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let log_path = tmp_dir.join(format!("{ts}_{cmd_count}_{slug}.log"));
+    let _ = std::fs::write(&log_path, output);
+}
+
 /// The sift Lua runtime, holding the VM and registered API.
 pub struct SiftLua {
     /// The Lua VM.
@@ -101,7 +156,8 @@ impl SiftLua {
         self.register_cache(&sift)?;
         self.register_hash(&sift)?;
         self.register_fs(&sift)?;
-        self.register_json(&sift)?;
+        self.register_json_toon(&sift)?;
+        self.register_jq(&sift)?;
         self.register_env(&sift)?;
         self.register_classify(&sift)?;
         self.register_meta(&sift)?;
@@ -110,36 +166,10 @@ impl SiftLua {
     }
 
     fn register_exec(&self, sift: &Table) -> Result<()> {
-        let exec_fn = self.lua.create_function(|_, cmd: String| {
-            // Spawn bash via PTY, execute command, read output
-            let bash_path = find_real_bash();
-            let pty_system = portable_pty::native_pty_system();
-            let pair = pty_system
-                .openpty(portable_pty::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
-                .map_err(|e| mlua::Error::external(format!("pty: {e}")))?;
-            let cmd_builder = portable_pty::CommandBuilder::new(&bash_path);
-            let mut child = pair.slave.spawn_command(cmd_builder)
-                .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
-            let mut writer = pair.master.take_writer()
-                .map_err(|e| mlua::Error::external(format!("writer: {e}")))?;
-            let full_cmd = format!("{cmd}; exit $?\n");
-            let _ = writer.write_all(full_cmd.as_bytes());
-            let _ = writer.flush();
-            drop(writer);
-            let mut reader = pair.master.try_clone_reader()
-                .map_err(|e| mlua::Error::external(format!("reader: {e}")))?;
-            let mut output = Vec::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => output.extend_from_slice(&buf[..n]),
-                }
-            }
-            let exit_code = child.wait()
-                .map_or(1, |s| s.exit_code().cast_signed());
-            let output_str = String::from_utf8_lossy(&output).to_string();
-            Ok((output_str, exit_code))
+        let session_id = self.ctx.session_id.clone().unwrap_or_default();
+        let cmd_count = self.ctx.cmd_count;
+        let exec_fn = self.lua.create_function(move |_, cmd: String| {
+            exec_command(&cmd, &session_id, cmd_count)
         })?;
         sift.set("exec", exec_fn)?;
 
@@ -260,7 +290,7 @@ impl SiftLua {
         Ok(())
     }
 
-    fn register_json(&self, sift: &Table) -> Result<()> {
+    fn register_json_toon(&self, sift: &Table) -> Result<()> {
         let json = self.lua.create_table()?;
         let json_encode = self.lua.create_function(|lua, val: Value| {
             let json_val = lua.from_value::<serde_json::Value>(val)
@@ -278,7 +308,6 @@ impl SiftLua {
         json.set("decode", json_decode)?;
         sift.set("json", json)?;
 
-        // sift.toon.{encode, decode}
         let toon = self.lua.create_table()?;
         let toon_encode = self.lua.create_function(|lua, val: Value| {
             let json_val = lua.from_value::<serde_json::Value>(val)
@@ -295,9 +324,10 @@ impl SiftLua {
         })?;
         toon.set("decode", toon_decode)?;
         sift.set("toon", toon)?;
+        Ok(())
+    }
 
-        // sift.jq.query(data, filter)
-        // Uses the `jaq` CLI tool. Install with: cargo install jaq
+    fn register_jq(&self, sift: &Table) -> Result<()> {
         let jq = self.lua.create_table()?;
         let jq_query = self.lua.create_function(|lua, (data, filter): (Value, String)| {
             let json_str: String = if let Value::String(s) = &data {
@@ -599,5 +629,106 @@ mod tests {
         tbl.set("name", "test").unwrap();
         let encoded: String = encode.call(tbl).unwrap();
         assert!(encoded.contains("\"name\""));
+    }
+
+    #[test]
+    fn test_find_real_bash_exists() {
+        let bash = find_real_bash();
+        assert!(bash.exists(), "real bash should exist at {bash:?}");
+    }
+
+    #[test]
+    fn test_sift_fs_write_and_read() {
+        let lua = SiftLua::new(None, test_context()).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let fs: Table = sift.get("fs").unwrap();
+        let fs_write: mlua::Function = fs.get("write").unwrap();
+        let fs_read: mlua::Function = fs.get("read").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt").display().to_string();
+        fs_write.call::<()>((path.clone(), "hello world")).unwrap();
+        let content: String = fs_read.call((path, mlua::Value::Nil)).unwrap();
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn test_sift_fs_stat() {
+        let lua = SiftLua::new(None, test_context()).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let fs: Table = sift.get("fs").unwrap();
+        let fs_stat: mlua::Function = fs.get("stat").unwrap();
+        let result: Table = fs_stat.call("Cargo.toml").unwrap();
+        let is_file: bool = result.get("is_file").unwrap();
+        assert!(is_file);
+    }
+
+    #[test]
+    fn test_sift_fs_exists() {
+        let lua = SiftLua::new(None, test_context()).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let fs: Table = sift.get("fs").unwrap();
+        let fs_exists: mlua::Function = fs.get("exists").unwrap();
+        assert!(fs_exists.call::<bool>("Cargo.toml").unwrap());
+        assert!(!fs_exists.call::<bool>("nonexistent_file_xyz").unwrap());
+    }
+
+    #[test]
+    fn test_sift_toon_encode() {
+        let lua = SiftLua::new(None, test_context()).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let toon: Table = sift.get("toon").unwrap();
+        let encode: mlua::Function = toon.get("encode").unwrap();
+        let tbl = lua.lua.create_table().unwrap();
+        tbl.set("name", "test").unwrap();
+        let encoded: String = encode.call(tbl).unwrap();
+        assert!(encoded.contains("name"));
+    }
+
+    #[test]
+    fn test_sift_env() {
+        let lua = SiftLua::new(None, test_context()).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let env: Table = sift.get("env").unwrap();
+        let env_set: mlua::Function = env.get("set").unwrap();
+        let env_get: mlua::Function = env.get("get").unwrap();
+        env_set.call::<()>(("SIFT_TEST", "val")).unwrap();
+        let result: Option<String> = env_get.call("SIFT_TEST").unwrap();
+        assert_eq!(result, Some("val".to_string()));
+    }
+
+    #[test]
+    fn test_sift_meta() {
+        let ctx = SiftContext {
+            cwd: std::env::current_dir().unwrap(),
+            cmd_count: 42,
+            env: HashMap::new(),
+            session_id: Some("test-session".to_string()),
+            raw_bytes: 100,
+            filtered_bytes: 50,
+        };
+        let lua = SiftLua::new(None, ctx).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let meta: Table = sift.get("meta").unwrap();
+        let session_id: String = meta.get("session_id").unwrap();
+        assert_eq!(session_id, "test-session");
+        let cmd_count: i64 = meta.get("cmd_count").unwrap();
+        assert_eq!(cmd_count, 42);
+    }
+
+    #[test]
+    fn test_exec_command() {
+        let (output, code) = exec_command("echo hello", "test", 0).unwrap();
+        assert!(output.contains("hello"), "output should contain hello, got: {output}");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_save_output() {
+        let session_id = "test-save";
+        save_output("echo test", session_id, 1, "test content");
+        let tmp_dir = std::path::PathBuf::from("/tmp/sift").join(session_id);
+        let has_files = std::fs::read_dir(&tmp_dir).is_ok();
+        assert!(has_files, "should have saved output files");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

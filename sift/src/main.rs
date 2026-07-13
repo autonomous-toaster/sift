@@ -72,6 +72,7 @@ fn load_builtin_plugins(lua: &mut SiftLua) -> Result<()> {
     lua.load_plugin_from_str("bash", include_str!("../plugins/bash.lua"))?;
     lua.load_plugin_from_str("cat", include_str!("../plugins/cat.lua"))?;
     lua.load_plugin_from_str("command", include_str!("../plugins/command.lua"))?;
+    lua.load_plugin_from_str("git_status", include_str!("../plugins/git_status.lua"))?;
     Ok(())
 }
 
