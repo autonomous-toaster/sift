@@ -206,6 +206,56 @@ impl SiftLua {
             Ok(selected.join("\n"))
         })?;
         fs.set("read", fs_read)?;
+
+        // fs.write(path, content)
+        let fs_write = self.lua.create_function(|_, (path, content): (String, String)| {
+            std::fs::write(&path, &content)
+                .map_err(|e| mlua::Error::external(format!("write {path}: {e}")))?;
+            Ok(())
+        })?;
+        fs.set("write", fs_write)?;
+
+        // fs.edit(path, edits) — apply multiple disjoint text replacements
+        let fs_edit = self.lua.create_function(|_, (path, edits): (String, Table)| {
+            let mut content = std::fs::read_to_string(&path)
+                .map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
+            let num_edits = usize::try_from(edits.len().map_err(|e| mlua::Error::external(e.to_string()))?)
+                .map_err(|e| mlua::Error::external(format!("invalid edit count: {e}")))?;
+            for i in 1..=num_edits {
+                let edit: Table = edits.get(i)?;
+                let old_text: String = edit.get("oldText")?;
+                let new_text: String = edit.get("newText")?;
+                if !content.contains(&old_text) {
+                    return Err(mlua::Error::external(format!(
+                        "edit {path}: oldText not found: {old_text}"
+                    )));
+                }
+                content = content.replacen(&old_text, &new_text, 1);
+            }
+            std::fs::write(&path, &content)
+                .map_err(|e| mlua::Error::external(format!("write {path}: {e}")))?;
+            Ok(())
+        })?;
+        fs.set("edit", fs_edit)?;
+
+        // fs.stat(path)
+        let fs_stat = self.lua.create_function(|lua, path: String| {
+            let meta = std::fs::metadata(&path)
+                .map_err(|e| mlua::Error::external(format!("stat {path}: {e}")))?;
+            let result = lua.create_table()?;
+            result.set("size", meta.len())?;
+            result.set("is_dir", meta.is_dir())?;
+            result.set("is_file", meta.is_file())?;
+            Ok(result)
+        })?;
+        fs.set("stat", fs_stat)?;
+
+        // fs.exists(path)
+        let fs_exists = self.lua.create_function(|_, path: String| {
+            Ok(std::path::Path::new(&path).exists())
+        })?;
+        fs.set("exists", fs_exists)?;
+
         sift.set("fs", fs)?;
         Ok(())
     }
