@@ -4,6 +4,7 @@
 //! and handles plugin loading and dispatch.
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -13,6 +14,30 @@ use sha2::Digest;
 
 use crate::classifier::classify;
 use crate::session::SessionStore;
+
+/// Find the real bash binary, excluding our own path.
+fn find_real_bash() -> PathBuf {
+    let self_path = std::env::current_exe().ok();
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    for dir in path_var.split(':') {
+        let candidate = PathBuf::from(dir).join("bash");
+        if candidate.is_file() {
+            if let Ok(canonical) = candidate.canonicalize() {
+                if self_path.as_ref().is_some_and(|s| s == &canonical) {
+                    continue;
+                }
+                return canonical;
+            }
+        }
+    }
+    for fallback in &["/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash"] {
+        let p = PathBuf::from(fallback);
+        if p.exists() {
+            return p;
+        }
+    }
+    PathBuf::from("/bin/bash")
+}
 
 /// The sift Lua runtime, holding the VM and registered API.
 pub struct SiftLua {
@@ -85,8 +110,36 @@ impl SiftLua {
     }
 
     fn register_exec(&self, sift: &Table) -> Result<()> {
-        let exec_fn = self.lua.create_function(|_, _cmd: String| {
-            Ok((String::new(), 0i32))
+        let exec_fn = self.lua.create_function(|_, cmd: String| {
+            // Spawn bash via PTY, execute command, read output
+            let bash_path = find_real_bash();
+            let pty_system = portable_pty::native_pty_system();
+            let pair = pty_system
+                .openpty(portable_pty::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+                .map_err(|e| mlua::Error::external(format!("pty: {e}")))?;
+            let cmd_builder = portable_pty::CommandBuilder::new(&bash_path);
+            let mut child = pair.slave.spawn_command(cmd_builder)
+                .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
+            let mut writer = pair.master.take_writer()
+                .map_err(|e| mlua::Error::external(format!("writer: {e}")))?;
+            let full_cmd = format!("{cmd}; exit $?\n");
+            let _ = writer.write_all(full_cmd.as_bytes());
+            let _ = writer.flush();
+            drop(writer);
+            let mut reader = pair.master.try_clone_reader()
+                .map_err(|e| mlua::Error::external(format!("reader: {e}")))?;
+            let mut output = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => output.extend_from_slice(&buf[..n]),
+                }
+            }
+            let exit_code = child.wait()
+                .map_or(1, |s| s.exit_code().cast_signed());
+            let output_str = String::from_utf8_lossy(&output).to_string();
+            Ok((output_str, exit_code))
         })?;
         sift.set("exec", exec_fn)?;
 

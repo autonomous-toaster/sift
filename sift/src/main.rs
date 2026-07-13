@@ -12,6 +12,7 @@
 mod pty;
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
@@ -53,6 +54,8 @@ async fn main() -> Result<()> {
 
     // Load built-in plugins
     load_builtin_plugins(&mut lua)?;
+    // Load user plugins from filesystem
+    load_user_plugins(&mut lua);
 
     match args.command {
         Some(cmd) => agent_mode(&lua, &cmd),
@@ -66,13 +69,47 @@ async fn main() -> Result<()> {
 
 /// Load all built-in Lua plugins.
 fn load_builtin_plugins(lua: &mut SiftLua) -> Result<()> {
-    // bash.lua — default fallback plugin
     lua.load_plugin_from_str("bash", include_str!("../plugins/bash.lua"))?;
-    // cat.lua — file read caching
     lua.load_plugin_from_str("cat", include_str!("../plugins/cat.lua"))?;
-    // command.lua — bypass mechanism
     lua.load_plugin_from_str("command", include_str!("../plugins/command.lua"))?;
     Ok(())
+}
+
+/// Load user plugins from `~/.config/sift/plugins/*.lua` and `SIFT_PLUGINS`.
+fn load_user_plugins(lua: &mut SiftLua) {
+    // Scan ~/.config/sift/plugins/
+    if let Some(home) = dirs::home_dir() {
+        let user_dir = home.join(".config").join("sift").join("plugins");
+        if user_dir.exists() {
+            load_plugins_from_dir(lua, &user_dir);
+        }
+    }
+    // Scan SIFT_PLUGINS env var
+    if let Ok(extra) = std::env::var("SIFT_PLUGINS") {
+        for path in extra.split(':') {
+            let dir = PathBuf::from(path);
+            if dir.is_dir() {
+                load_plugins_from_dir(lua, &dir);
+            }
+        }
+    }
+}
+
+/// Load all `.lua` files from a directory as plugins.
+fn load_plugins_from_dir(lua: &mut SiftLua, dir: &PathBuf) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "lua") {
+                if let Ok(code) = std::fs::read_to_string(&path) {
+                    let name = path.file_stem().unwrap_or_default().to_string_lossy();
+                    if let Err(e) = lua.load_plugin_from_str(&name, &code) {
+                        eprintln!("sift: failed to load plugin {}: {e}", path.display());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Agent mode: execute a command and output the result.
