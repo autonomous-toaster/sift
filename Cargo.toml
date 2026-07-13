@@ -20,6 +20,7 @@ md-5 = "0.10"
 sha2 = "0.10"
 mlua = { version = "0.10", features = ["lua54", "send", "serialize"] }
 tempfile = "3"
+toon-format = "0.4"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-util", "io-std", "process"] }
 portable-pty = "0.9"
 nix = { version = "0.29", default-features = false, features = ["signal", "process"] }

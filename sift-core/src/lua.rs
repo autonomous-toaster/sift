@@ -277,6 +277,53 @@ impl SiftLua {
         })?;
         json.set("decode", json_decode)?;
         sift.set("json", json)?;
+
+        // sift.toon.{encode, decode}
+        let toon = self.lua.create_table()?;
+        let toon_encode = self.lua.create_function(|lua, val: Value| {
+            let json_val = lua.from_value::<serde_json::Value>(val)
+                .map_err(|e| mlua::Error::external(format!("toon encode: {e}")))?;
+            toon_format::encode_default(&json_val)
+                .map_err(|e| mlua::Error::external(format!("toon encode: {e}")))
+        })?;
+        toon.set("encode", toon_encode)?;
+        let toon_decode = self.lua.create_function(|lua, s: String| {
+            let json_val: serde_json::Value = toon_format::decode_default(&s)
+                .map_err(|e| mlua::Error::external(format!("toon decode: {e}")))?;
+            lua.to_value(&json_val)
+                .map_err(|e| mlua::Error::external(format!("toon decode: {e}")))
+        })?;
+        toon.set("decode", toon_decode)?;
+        sift.set("toon", toon)?;
+
+        // sift.jq.query(data, filter)
+        // Uses the `jaq` CLI tool. Install with: cargo install jaq
+        let jq = self.lua.create_table()?;
+        let jq_query = self.lua.create_function(|lua, (data, filter): (Value, String)| {
+            let json_str: String = if let Value::String(s) = &data {
+                s.to_str()
+                    .map_err(|e| mlua::Error::external(format!("jq str: {e}")))?
+                    .to_string()
+            } else {
+                let json_val: serde_json::Value = lua.from_value(data)
+                    .map_err(|e| mlua::Error::external(format!("jq convert: {e}")))?;
+                serde_json::to_string(&json_val)
+                    .map_err(|e| mlua::Error::external(format!("jq serialize: {e}")))?
+            };
+            let output = std::process::Command::new("jaq")
+                .arg(&filter)
+                .arg(json_str)
+                .output()
+                .map_err(|e| mlua::Error::external(format!("jq exec: {e}")))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(mlua::Error::external(format!("jq error: {stderr}")));
+            }
+            let result = String::from_utf8_lossy(&output.stdout).to_string();
+            Ok(result)
+        })?;
+        jq.set("query", jq_query)?;
+        sift.set("jq", jq)?;
         Ok(())
     }
 

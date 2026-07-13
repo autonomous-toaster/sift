@@ -5,7 +5,7 @@ edition = "2021"
 description = "Core types and runtime for sift — AI-optimized shell proxy"
 
 [package.metadata.cargo-machete]
-ignored = ["md-5", "serde"]
+ignored = ["md-5", "serde", "toon-format"]
 
 [lints]
 workspace = true
@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { workspace = true }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
+toon-format = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
