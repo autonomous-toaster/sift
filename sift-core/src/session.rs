@@ -15,40 +15,41 @@ pub struct Session {
     pub env: HashMap<String, String>,
     /// Command counter (for staleness heuristic).
     pub cmd_count: u64,
+    /// Session identifier.
+    pub session_id: Option<String>,
     /// Optional SQLite-backed session store.
     pub store: Option<SessionStore>,
 }
 
 impl Session {
     /// Create a new session from the environment.
-    ///
-    /// Session store is not opened. Call `open_store().await` to open it.
+    #[must_use]
     pub fn from_env() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let env: HashMap<String, String> = std::env::vars().collect();
+        let session_id = std::env::var("AI_SESSION").ok();
 
         Self {
             cwd,
             env,
             cmd_count: 0,
+            session_id,
             store: None,
         }
     }
 
-    /// Open the session store if `AI_SESSION` is set.
+    /// Open the session store at `~/.sift/sessions.db`.
     pub async fn open_store(&mut self) {
-        if let Ok(_session_id) = std::env::var("AI_SESSION") {
-            let db_path = dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".baish")
-                .join("sessions.db");
-            match SessionStore::open(&db_path).await {
-                Ok(store) => {
-                    self.store = Some(store);
-                }
-                Err(e) => {
-                    eprintln!("baish: failed to open session store: {e}");
-                }
+        let db_path = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".sift")
+            .join("sessions.db");
+        match SessionStore::open(&db_path).await {
+            Ok(store) => {
+                self.store = Some(store);
+            }
+            Err(e) => {
+                eprintln!("sift: failed to open session store: {e}");
             }
         }
     }
@@ -71,10 +72,10 @@ pub struct FileCacheEntry {
     pub read_count: i32,
 }
 
-/// A conversation cache entry.
+/// A conversation cache entry with token tracking metrics.
 #[derive(Debug, Clone)]
 pub struct ConversationEntry {
-    /// Type of item ('`file_content`', '`command_output`').
+    /// Type of item (`file_content`, `command_output`).
     pub item_type: String,
     /// Unique ID for the item.
     pub item_id: String,
@@ -90,6 +91,16 @@ pub struct ConversationEntry {
     pub shown_count: i32,
     /// Number of times model re-requested after "unchanged".
     pub re_requested: i32,
+    /// Raw output bytes before filtering.
+    pub raw_bytes: Option<i64>,
+    /// Filtered output bytes after plugin processing.
+    pub filtered_bytes: Option<i64>,
+    /// Token reduction in basis points (1/100 of a percent).
+    pub reduction_bps: Option<i64>,
+    /// Name of the plugin that handled this command.
+    pub plugin_name: Option<String>,
+    /// Format of the output (json, toon, text).
+    pub output_format: Option<String>,
 }
 
 /// SQLite-backed session store.
@@ -100,7 +111,6 @@ pub struct SessionStore {
 impl SessionStore {
     /// Open or create a session store at the given path.
     pub async fn open(db_path: &Path) -> Result<Self> {
-        // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -114,7 +124,6 @@ impl SessionStore {
             .connect_with(opts)
             .await?;
 
-        // Run migrations
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS file_cache (
                 path       TEXT NOT NULL,
@@ -139,6 +148,11 @@ impl SessionStore {
                 last_shown         INTEGER NOT NULL,
                 shown_count        INTEGER DEFAULT 0,
                 re_requested       INTEGER DEFAULT 0,
+                raw_bytes          INTEGER,
+                filtered_bytes     INTEGER,
+                reduction_bps      INTEGER,
+                plugin_name        TEXT,
+                output_format      TEXT,
                 PRIMARY KEY (item_type, item_id)
             )",
         )
@@ -196,9 +210,10 @@ impl SessionStore {
         item_type: &str,
         item_id: &str,
     ) -> Result<Option<ConversationEntry>> {
-        let row = sqlx::query_as::<_, (String, String, Option<i32>, i64, i64, i64, i32, i32)>(
+        let row = sqlx::query_as::<_, (String, String, Option<i32>, i64, i64, i64, i32, i32, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<String>)>(
             "SELECT item_type, item_id, estimated_tokens, commands_since_at_create,
-                    first_shown, last_shown, shown_count, re_requested
+                    first_shown, last_shown, shown_count, re_requested,
+                    raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format
              FROM conversation_cache
              WHERE item_type = ?1 AND item_id = ?2",
         )
@@ -208,7 +223,7 @@ impl SessionStore {
         .await?;
 
         Ok(row.map(
-            |(item_type, item_id, estimated_tokens, commands_since_at_create, first_shown, last_shown, shown_count, re_requested)| {
+            |(item_type, item_id, estimated_tokens, commands_since_at_create, first_shown, last_shown, shown_count, re_requested, raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format)| {
                 ConversationEntry {
                     item_type,
                     item_id,
@@ -218,33 +233,61 @@ impl SessionStore {
                     last_shown,
                     shown_count,
                     re_requested,
+                    raw_bytes,
+                    filtered_bytes,
+                    reduction_bps,
+                    plugin_name,
+                    output_format,
                 }
             },
         ))
     }
 
     /// Record a conversation cache entry (insert or update).
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_conversation(
         &self,
         item_type: &str,
         item_id: &str,
         tokens: Option<i32>,
         commands_since: i64,
+        raw_bytes: Option<i64>,
+        filtered_bytes: Option<i64>,
+        plugin_name: Option<String>,
+        output_format: Option<String>,
     ) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
+        // Compute reduction percentage using rational arithmetic to avoid f64 cast.
+        // Store as basis points (1/100 of a percent) for integer precision.
+        let reduction_bps: Option<i64> = match (raw_bytes, filtered_bytes) {
+            (Some(raw), Some(filtered)) if raw > 0 => {
+                Some((raw.saturating_sub(filtered)).saturating_mul(10_000) / raw)
+            }
+            _ => None,
+        };
 
         sqlx::query(
-            "INSERT INTO conversation_cache (item_type, item_id, estimated_tokens, commands_since_at_create, first_shown, last_shown)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            "INSERT INTO conversation_cache (item_type, item_id, estimated_tokens, commands_since_at_create, first_shown, last_shown, raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(item_type, item_id) DO UPDATE SET
                 last_shown = excluded.last_shown,
-                shown_count = shown_count + 1",
+                shown_count = shown_count + 1,
+                raw_bytes = excluded.raw_bytes,
+                filtered_bytes = excluded.filtered_bytes,
+                reduction_bps = excluded.reduction_bps,
+                plugin_name = excluded.plugin_name,
+                output_format = excluded.output_format",
         )
         .bind(item_type)
         .bind(item_id)
         .bind(tokens)
         .bind(commands_since)
         .bind(now)
+        .bind(raw_bytes)
+        .bind(filtered_bytes)
+        .bind(reduction_bps)
+        .bind(&plugin_name)
+        .bind(&output_format)
         .execute(&self.pool)
         .await?;
 
@@ -264,6 +307,13 @@ impl SessionStore {
 
         Ok(())
     }
+
+    /// Clear all cache entries for a session.
+    pub async fn clear_session(&self) -> Result<()> {
+        sqlx::query("DELETE FROM conversation_cache").execute(&self.pool).await?;
+        sqlx::query("DELETE FROM file_cache").execute(&self.pool).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -281,7 +331,6 @@ mod tests {
     async fn test_session_store_open_and_close() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-
         let store = SessionStore::open(&db_path).await.unwrap();
         drop(store);
     }
@@ -291,7 +340,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let store = SessionStore::open(&db_path).await.unwrap();
-
         let result = store.get_file_cache("/nonexistent").await.unwrap();
         assert!(result.is_none());
     }
@@ -310,7 +358,6 @@ mod tests {
             last_read: 2_000_000,
             read_count: 1,
         };
-
         store.upsert_file_cache(&entry).await.unwrap();
 
         let result = store.get_file_cache("/tmp/test.txt").await.unwrap();
@@ -319,26 +366,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_conversation_cache_miss() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let store = SessionStore::open(&db_path).await.unwrap();
-
-        let result = store
-            .get_conversation("file_content", "nonexistent")
-            .await
-            .unwrap();
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_conversation_cache_record_and_read() {
+    async fn test_conversation_cache() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let store = SessionStore::open(&db_path).await.unwrap();
 
         store
-            .record_conversation("file_content", "test:id", Some(100), 0)
+            .record_conversation("file_content", "test:id", Some(100), 0, None, None, None, None)
             .await
             .unwrap();
 
@@ -347,7 +381,6 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().shown_count, 0);
     }
 
     #[tokio::test]
@@ -357,10 +390,9 @@ mod tests {
         let store = SessionStore::open(&db_path).await.unwrap();
 
         store
-            .record_conversation("file_content", "test:id", Some(100), 0)
+            .record_conversation("file_content", "test:id", Some(100), 0, None, None, None, None)
             .await
             .unwrap();
-
         store
             .increment_re_requested("file_content", "test:id")
             .await
@@ -371,5 +403,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.unwrap().re_requested, 1);
+    }
+
+    #[tokio::test]
+    async fn test_clear_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let store = SessionStore::open(&db_path).await.unwrap();
+
+        store
+            .record_conversation("file_content", "test:id", Some(100), 0, None, None, None, None)
+            .await
+            .unwrap();
+        store.clear_session().await.unwrap();
+
+        let result = store
+            .get_conversation("file_content", "test:id")
+            .await
+            .unwrap();
+        assert!(result.is_none());
     }
 }

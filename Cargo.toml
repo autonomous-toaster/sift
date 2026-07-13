@@ -1,38 +1,25 @@
-[package]
-name = "baish"
-version = "0.1.0"
-edition = "2021"
-description = "AI-optimized shell — minimal POSIX shell with plugin-based command optimization"
-license = "MIT"
-repository = "https://github.com/autonomous-toaster/baish"
+[workspace]
+resolver = "2"
+members = ["sift-core", "sift"]
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = "deny"
 pedantic = "deny"
 nursery = "deny"
 
-[dependencies]
-async-trait = "0.1"
-brush-parser = "0.4"
-sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "chrono"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
-os_pipe = "1"
-sha2 = "0.10"
+[workspace.dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+async-trait = "0.1"
 chrono = "0.4"
-hex = "0.4"
 dirs = "5"
-
-[dev-dependencies]
+hex = "0.4"
+md-5 = "0.10"
+sha2 = "0.10"
+mlua = { version = "0.10", features = ["lua54", "send", "serialize"] }
 tempfile = "3"
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-panic = "abort"
-strip = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "io-util", "io-std", "process"] }
+portable-pty = "0.9"
+nix = { version = "0.29", default-features = false, features = ["signal", "process"] }
