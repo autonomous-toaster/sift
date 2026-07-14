@@ -159,6 +159,17 @@ impl SessionStore {
         .execute(&pool)
         .await?;
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sift_cache (
+                key        TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (key, session_id)
+            )",
+        )
+        .execute(&pool)
+        .await?;
+
         Ok(Self { pool })
     }
 
@@ -314,6 +325,42 @@ impl SessionStore {
         sqlx::query("DELETE FROM file_cache").execute(&self.pool).await?;
         Ok(())
     }
+
+    /// Check if a cache key exists for the given session.
+    pub async fn cache_has(&self, key: &str, session_id: &str) -> Result<bool> {
+        let row = sqlx::query_scalar::<_, i32>(
+            "SELECT 1 FROM sift_cache WHERE key = ?1 AND session_id = ?2",
+        )
+        .bind(key)
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    /// Record a cache key for the given session.
+    pub async fn cache_set(&self, key: &str, session_id: &str) -> Result<()> {
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query(
+            "INSERT INTO sift_cache (key, session_id, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key, session_id) DO NOTHING",
+        )
+        .bind(key)
+        .bind(session_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Clear all cache entries for the given session.
+    pub async fn cache_reset(&self, session_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM sift_cache WHERE session_id = ?1")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -422,5 +469,49 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cache_has_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let store = SessionStore::open(&db_path).await.unwrap();
+        let result = store.cache_has("path:hash", "session-a").await.unwrap();
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_cache_set_and_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let store = SessionStore::open(&db_path).await.unwrap();
+
+        store.cache_set("path:hash", "session-a").await.unwrap();
+
+        // Same session: hit
+        assert!(store.cache_has("path:hash", "session-a").await.unwrap());
+        // Different session: miss
+        assert!(!store.cache_has("path:hash", "session-b").await.unwrap());
+        // Different key: miss
+        assert!(!store.cache_has("other:hash", "session-a").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_cache_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let store = SessionStore::open(&db_path).await.unwrap();
+
+        store.cache_set("k1", "session-a").await.unwrap();
+        store.cache_set("k2", "session-a").await.unwrap();
+        store.cache_set("k1", "session-b").await.unwrap();
+
+        store.cache_reset("session-a").await.unwrap();
+
+        // Session A entries gone
+        assert!(!store.cache_has("k1", "session-a").await.unwrap());
+        assert!(!store.cache_has("k2", "session-a").await.unwrap());
+        // Session B entries untouched
+        assert!(store.cache_has("k1", "session-b").await.unwrap());
     }
 }

@@ -34,9 +34,11 @@ return {
 
         -- Compute hash for cache
         local hash = sift.hash.sha256(content)
+        -- Cache key is content-based (path:hash), no session_id
+        -- Session scoping is handled by the cache layer via ctx
         local cache_key = path .. ":" .. hash
 
-        if sift.cache.has(cache_key) then
+        if sift.cache.has(ctx, cache_key) then
             return {
                 status = "unchanged",
                 fingerprint = cache_key,
@@ -44,7 +46,7 @@ return {
             }
         end
 
-        sift.cache.set(cache_key, true)
+        sift.cache.set(ctx, cache_key)
 
         return {
             status = "handled",

@@ -1,66 +1,97 @@
 # STD-003 · Plugin Architecture
 
-## Plugin trait
+## Plugin format (Lua)
 
-Every plugin implements:
+Every plugin is a Lua file that returns a table with:
 
-```rust
-pub enum PluginResult {
-    /// Plugin handled the command. Output goes to stdout.
-    Handled { output: Vec<u8>, exit_code: i32 },
-    /// Plugin did not handle this command. Fall through to exec real binary.
-    Passthrough,
-    /// Output is identical to a previous invocation. Emit a short marker.
-    Unchanged { fingerprint: String, message: String },
-}
+```lua
+return {
+    -- Required: plugin name (used for debugging and metrics)
+    name = "my-plugin",
 
-pub trait Plugin: Send + Sync {
-    /// Command name this plugin handles (e.g. "cat", "git").
-    fn name(&self) -> &str;
+    -- Optional: dispatch priority (default 0). Higher wins on tie.
+    -- Built-in plugins use -1000. The command plugin uses 1000.
+    priority = 0,
 
-    /// Execute the command.
-    /// `args` is the command arguments (excluding the command name).
-    /// `stdin` is the piped input, if any.
-    fn execute(
-        &self,
-        session: &mut Session,
-        args: &[String],
-        stdin: Option<&[u8]>,
-    ) -> Result<PluginResult>;
-}
-```
+    -- Optional: command pattern for matching (defaults to name).
+    -- Used for longest-prefix matching against the command name.
+    pattern = "my-plugin",
 
-## Registry
-
-The registry maps command names to plugins using longest-prefix matching:
-
-```rust
-pub struct PluginRegistry {
-    plugins: Vec<Box<dyn Plugin>>,
-}
-
-impl PluginRegistry {
-    pub fn register(&mut self, plugin: Box<dyn Plugin>);
-    pub fn find(&self, cmd: &str) -> Option<&dyn Plugin>;
+    -- Required: execution function.
+    -- ctx: table with session context (session_id, cmd_count, cwd, command)
+    -- args: array of command arguments (excluding command name)
+    -- stdin: piped input string, or nil if no pipe
+    -- Returns: table with status, output, exit_code
+    execute = function(ctx, args, stdin)
+        -- ...
+        return { status = "handled", output = "...", exit_code = 0 }
+    end
 }
 ```
 
-Subcommand matching (e.g. `cargo build` vs `cargo test`) is handled by the plugin itself. The registry matches on the top-level command name only. The plugin receives the full args and dispatches internally.
+## Plugin return values
 
-## Interception rules
+The `execute` function must return a table with:
 
-A plugin is only invoked when:
-1. The command's stdout goes directly to the PTY/harness (not piped to another command, not redirected to a file).
-2. The command name matches a registered plugin.
-3. The plugin returns `Handled` or `Unchanged`.
+| Field | Type | Description |
+|---|---|---|
+| `status` | string | One of: `"handled"`, `"unchanged"`, `"passthrough"`, `"truncated"` |
+| `output` | string (optional) | Output to emit. Required for handled, truncated. |
+| `exit_code` | integer (optional) | Exit code. Default 0. |
+| `message` | string (optional) | Short message for unchanged status. |
+| `fingerprint` | string (optional) | Unique identifier for unchanged detection. |
 
-If any condition is false, the command falls through to exec the real binary.
+### Status values
+
+- **`"handled"`** — Plugin processed the command. `output` is emitted to stdout.
+- **`"unchanged"`** — Output is identical to a previous invocation. `message` is emitted as a short marker (e.g., `[sift] file unchanged`).
+- **`"passthrough"`** — Plugin did not handle this command. sift executes the real binary via `std::process::Command` with pipes.
+- **`"truncated"`** — Plugin truncated the output. `output` contains the summary. A bypass notice with the full output path is appended.
+
+## Plugin context (ctx)
+
+The `ctx` table passed to `execute()` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `session_id` | string | Current AI_SESSION value |
+| `cmd_count` | integer | Command counter (monotonically increasing) |
+| `cwd` | string | Current working directory |
+| `command` | string | The command name (e.g., "git", "cat") |
+
+## Registry and dispatch
+
+The registry maps command patterns to plugins using longest-prefix matching, then highest priority:
+
+1. Build candidate list: `[cmd]`, `[cmd, arg1]`, `[cmd, arg1, arg2]`, ...
+2. For each candidate (longest first), find a matching plugin pattern.
+3. If multiple plugins match the same pattern, highest priority wins.
+4. If no plugin matches, the `__default__` plugin is used (bash.lua).
+5. If no `__default__` exists, the command is executed directly via `std::process::Command`.
 
 ## Plugin responsibilities
 
 Each plugin must:
-- Accept all standard flags for the command it wraps (or return `Passthrough` for unsupported flags).
+- Accept all standard flags for the command it wraps (or return `"passthrough"` for unsupported flags).
 - Produce byte-for-byte identical output to the real command for the same input.
 - Never silently drop or alter data — only compress whitespace, strip ANSI, or apply lossless transformations.
-- Check the session store for cached results before executing.
-- Update the session store after executing.
+- Use `sift.cache.has(ctx, key)` and `sift.cache.set(ctx, key)` for caching.
+- Use `sift.exec(cmd)` to run commands, which returns `(stdout, stderr, exit_code)`.
+
+## Built-in plugins
+
+| Plugin | Pattern | Priority | Description |
+|---|---|---|---|
+| command.lua | `command` | 1000 | Bypass all plugins, run real binary |
+| reset.lua | `reset` | 1000 | Clear sift cache for current session |
+| cat.lua | `cat` | 0 | File read with content-based caching |
+| git_status.lua | `git` | 0 | Git status with working-tree-clean detection |
+| bash.lua | `__default__` | -1000 | Default fallback, runs command via sift.exec() |
+
+## User plugins
+
+User plugins are loaded from:
+1. `~/.config/sift/plugins/*.lua`
+2. Paths in `SIFT_PLUGINS` env var (colon-separated)
+
+User plugins are loaded after built-in plugins. At the same declared priority, user plugins win over built-ins (loaded later = higher effective priority).

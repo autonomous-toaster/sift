@@ -5,7 +5,7 @@ edition = "2021"
 description = "Core types and runtime for sift — AI-optimized shell proxy"
 
 [package.metadata.cargo-machete]
-ignored = ["md-5", "serde", "toon-format", "jaq-parse", "jaq-syn", "jaq-interpret"]
+ignored = ["md-5", "serde", "toon-format", "jaq-parse", "jaq-syn", "jaq-interpret", "futures"]
 
 [lints]
 workspace = true
@@ -15,10 +15,10 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 brush-parser = "0.4"
+futures = "0.3"
 hex = { workspace = true }
 md-5 = { workspace = true }
 mlua = { workspace = true }
-portable-pty = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { workspace = true }

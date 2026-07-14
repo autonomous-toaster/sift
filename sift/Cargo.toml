@@ -21,8 +21,6 @@ clap = { version = "4", features = ["derive"] }
 dirs = { workspace = true }
 hex = { workspace = true }
 mlua = { workspace = true }
-portable-pty = { workspace = true }
-nix = { workspace = true }
 sha2 = { workspace = true }
 sift-core = { path = "../sift-core" }
 tokio = { workspace = true, features = ["process", "io-util"] }

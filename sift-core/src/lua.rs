@@ -4,7 +4,6 @@
 //! and handles plugin loading and dispatch.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -41,44 +40,31 @@ fn find_real_bash() -> PathBuf {
 }
 
 /// Execute a command via PTY and return `(output_string, exit_code)`.
-fn exec_command(cmd: &str, session_id: &str, cmd_count: u64) -> Result<(String, i32), mlua::Error> {
-    let (output_str, exit_code) = run_pty(cmd)?;
-    save_output(cmd, session_id, cmd_count, &output_str);
-    Ok((output_str, exit_code))
-}
-
-/// Run a command in a PTY and return the output and exit code.
-fn run_pty(cmd: &str) -> Result<(String, i32), mlua::Error> {
+/// Execute a command via `std::process::Command` with pipes and return `(stdout, stderr, exit_code)`.
+fn exec_command(cmd: &str, session_id: &str, cmd_count: u64) -> Result<(String, String, i32), mlua::Error> {
     let bash_path = find_real_bash();
-    let pty_system = portable_pty::native_pty_system();
-    let pair = pty_system
-        .openpty(portable_pty::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| mlua::Error::external(format!("pty: {e}")))?;
-    // Use bash -c to run the command directly (no interactive prompt/echo)
-    let mut cmd_builder = portable_pty::CommandBuilder::new(&bash_path);
-    cmd_builder.arg("-c");
-    cmd_builder.arg(cmd);
-    // Set working directory to current directory
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd_builder.cwd(cwd);
-    }
-    let mut child = pair.slave.spawn_command(cmd_builder)
+    let output = std::process::Command::new(&bash_path)
+        .arg("-c")
+        .arg(cmd)
+        .env("PAGER", "cat")
+        .env("TERM", "dumb")
+        .env("EDITOR", "true")
+        .env("GIT_EDITOR", "true")
+        .env("GIT_PAGER", "cat")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
         .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
-    drop(pair.slave);
-    let mut reader = pair.master.try_clone_reader()
-        .map_err(|e| mlua::Error::external(format!("reader: {e}")))?;
-    let mut output = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => output.extend_from_slice(&buf[..n]),
-        }
-    }
-    let exit_code = child.wait()
-        .map_or(1, |s| s.exit_code().cast_signed());
-    let output_str = String::from_utf8_lossy(&output).to_string();
-    Ok((output_str, exit_code))
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(1);
+
+    // Save combined output for bypass notices
+    let combined = format!("{stdout}{stderr}");
+    save_output(cmd, session_id, cmd_count, &combined);
+
+    Ok((stdout, stderr, exit_code))
 }
 
 /// Save raw output to a temp file.
@@ -172,7 +158,10 @@ impl SiftLua {
         let session_id = self.ctx.session_id.clone().unwrap_or_default();
         let cmd_count = self.ctx.cmd_count;
         let exec_fn = self.lua.create_function(move |_, cmd: String| {
-            exec_command(&cmd, &session_id, cmd_count)
+            let (stdout, stderr, exit_code) = exec_command(&cmd, &session_id, cmd_count)?;
+            // Return combined output for backward compat, plus stderr and exit_code
+            let combined = format!("{stdout}{stderr}");
+            Ok((combined, stderr, exit_code))
         })?;
         sift.set("exec", exec_fn)?;
 
@@ -203,21 +192,43 @@ impl SiftLua {
 
     fn register_cache(&self, sift: &Table) -> Result<()> {
         let cache = self.lua.create_table()?;
-        let store: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let store: Option<std::sync::Arc<crate::session::SessionStore>> = self.store.clone();
 
-        let s1 = std::sync::Arc::clone(&store);
-        let f_has = self.lua.create_function(move |_, key: String| {
-            Ok(s1.lock().unwrap().contains(&key))
+        // sift.cache.has(ctx, key) -> bool
+        let f_has = self.lua.create_function(move |_, (ctx, key): (Table, String)| {
+            let session_id: String = ctx.get("session_id")?;
+            store.as_ref().map_or_else(|| Ok(false), |s| {
+                match futures::executor::block_on(s.cache_has(&key, &session_id)) {
+                    Ok(v) => Ok(v),
+                    Err(e) => Err(mlua::Error::external(e.to_string())),
+                }
+            })
         })?;
         cache.set("has", f_has)?;
 
-        let s2 = std::sync::Arc::clone(&store);
-        let f_set = self.lua.create_function(move |_, (key, _val): (String, bool)| {
-            s2.lock().unwrap().push(key);
+        // sift.cache.set(ctx, key)
+        let store2 = self.store.clone();
+        let f_set = self.lua.create_function(move |_, (ctx, key): (Table, String)| {
+            let session_id: String = ctx.get("session_id")?;
+            if let Some(ref store) = store2 {
+                futures::executor::block_on(store.cache_set(&key, &session_id))
+                    .map_err(|e| mlua::Error::external(e.to_string()))?;
+            }
             Ok(())
         })?;
         cache.set("set", f_set)?;
+
+        // sift.cache.reset(ctx)
+        let store3 = self.store.clone();
+        let f_reset = self.lua.create_function(move |_, ctx: Table| {
+            let session_id: String = ctx.get("session_id")?;
+            if let Some(ref store) = store3 {
+                futures::executor::block_on(store.cache_reset(&session_id))
+                    .map_err(|e| mlua::Error::external(e.to_string()))?;
+            }
+            Ok(())
+        })?;
+        cache.set("reset", f_reset)?;
 
         sift.set("cache", cache)?;
         Ok(())
@@ -530,12 +541,19 @@ impl SiftLua {
         let output: String = result.get("output").unwrap_or_default();
         let exit_code: i32 = result.get("exit_code").unwrap_or(0);
 
-        // If plugin returned passthrough, execute the real binary
+        // Handle different statuses
         if status == "passthrough" {
             return Self::execute_passthrough(cmd, args);
         }
 
-        Ok((output, exit_code, entry.pattern.clone()))
+        // For "unchanged", use the message field as output
+        let final_output = if status == "unchanged" {
+            result.get::<String>("message").unwrap_or(output)
+        } else {
+            output
+        };
+
+        Ok((final_output, exit_code, entry.pattern.clone()))
     }
 
     /// Execute a command directly (passthrough — bypass all plugins).
@@ -545,9 +563,10 @@ impl SiftLua {
         } else {
             format!("{} {}", cmd, args.join(" "))
         };
-        // Use run_pty to execute the command directly
-        let (output, exit_code) = run_pty(&full_cmd)?;
-        Ok((output, exit_code, "passthrough".to_string()))
+        // Use exec_command to execute the command directly
+        let (stdout, stderr, exit_code) = exec_command(&full_cmd, "", 0)?;
+        let combined = format!("{stdout}{stderr}");
+        Ok((combined, exit_code, "passthrough".to_string()))
     }
 }
 
@@ -760,9 +779,24 @@ mod tests {
 
     #[test]
     fn test_exec_command() {
-        let (output, code) = exec_command("echo hello", "test", 0).unwrap();
-        assert!(output.contains("hello"), "output should contain hello, got: {output}");
+        let (stdout, stderr, code) = exec_command("echo hello", "test", 0).unwrap();
+        assert!(stdout.contains("hello"), "stdout should contain hello, got: {stdout}");
+        assert!(stderr.is_empty(), "stderr should be empty, got: {stderr}");
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_exec_command_with_stderr() {
+        let (stdout, stderr, code) = exec_command("echo out && echo err >&2", "test", 0).unwrap();
+        assert!(stdout.contains("out"), "stdout should contain out, got: {stdout}");
+        assert!(stderr.contains("err"), "stderr should contain err, got: {stderr}");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_exec_command_exit_code() {
+        let (_stdout, _stderr, code) = exec_command("exit 42", "test", 0).unwrap();
+        assert_eq!(code, 42, "exit code should be 42, got {code}");
     }
 
     #[test]

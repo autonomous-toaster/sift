@@ -9,8 +9,6 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 
-mod pty;
-
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -73,6 +71,7 @@ fn load_builtin_plugins(lua: &mut SiftLua) -> Result<()> {
     lua.load_plugin_from_str("cat", include_str!("../plugins/cat.lua"))?;
     lua.load_plugin_from_str("command", include_str!("../plugins/command.lua"))?;
     lua.load_plugin_from_str("git_status", include_str!("../plugins/git_status.lua"))?;
+    lua.load_plugin_from_str("reset", include_str!("../plugins/reset.lua"))?;
     Ok(())
 }
 

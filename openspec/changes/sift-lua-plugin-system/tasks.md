@@ -59,3 +59,16 @@
 - [x] 7.2 Update docs/examples/cat.lua to use new `sift.*` API.
 - [x] 7.3 Remove old `openspec/changes/baish-pty-architecture` (completed and superseded).
 - [x] 7.4 Verify `just ci` passes with all changes.
+
+## 8. Cache redesign and stderr handling
+
+- [x] 8.1 Add `sift_cache` table to SessionStore with cache_has, cache_set, cache_reset methods. Remove cache entries from conversation_cache.
+- [x] 8.2 Rewrite `sift.cache.*` Lua API: ctx-first interface (has/set/reset), no boolean value, session scoping via ctx.session_id.
+- [x] 8.3 Rewrite `run_pty()` → `exec_command()` using std::process::Command with pipes. Return (stdout, stderr, exit_code). Set PAGER=cat, TERM=dumb, EDITOR=true.
+- [x] 8.4 Update all plugins to use new sift.exec() return values: `local out, err, code = sift.exec(cmd)`.
+- [x] 8.5 Update cat.lua: cache key = path:hash (no session_id), use sift.cache.has/set(ctx, key).
+- [x] 8.6 Update git_status.lua: extend ctx.command + args instead of hardcoding, remove 2>&1, use new sift.exec() signature.
+- [x] 8.7 Write reset.lua: built-in plugin (pattern: reset, priority: 1000), calls sift.cache.reset(ctx), returns "[sift] ok".
+- [x] 8.8 Remove portable-pty dependency if no longer referenced. Remove pty.rs module.
+- [x] 8.9 Update STD-003 (plugin architecture) to reflect new plugin interface and sift.exec() signature.
+- [x] 8.10 Verify `just ci` passes with all changes.
