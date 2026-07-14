@@ -58,6 +58,10 @@ fn run_pty(cmd: &str) -> Result<(String, i32), mlua::Error> {
     let mut cmd_builder = portable_pty::CommandBuilder::new(&bash_path);
     cmd_builder.arg("-c");
     cmd_builder.arg(cmd);
+    // Set working directory to current directory
+    if let Ok(cwd) = std::env::current_dir() {
+        cmd_builder.cwd(cwd);
+    }
     let mut child = pair.slave.spawn_command(cmd_builder)
         .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
     drop(pair.slave);
