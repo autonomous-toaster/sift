@@ -4,11 +4,12 @@
 //! and handles plugin loading and dispatch.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use jaq_interpret::{FilterT, RcIter};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 use sha2::Digest;
 
@@ -53,15 +54,13 @@ fn run_pty(cmd: &str) -> Result<(String, i32), mlua::Error> {
     let pair = pty_system
         .openpty(portable_pty::PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| mlua::Error::external(format!("pty: {e}")))?;
-    let cmd_builder = portable_pty::CommandBuilder::new(&bash_path);
+    // Use bash -c to run the command directly (no interactive prompt/echo)
+    let mut cmd_builder = portable_pty::CommandBuilder::new(&bash_path);
+    cmd_builder.arg("-c");
+    cmd_builder.arg(cmd);
     let mut child = pair.slave.spawn_command(cmd_builder)
         .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
-    let mut writer = pair.master.take_writer()
-        .map_err(|e| mlua::Error::external(format!("writer: {e}")))?;
-    let full_cmd = format!("{cmd}; exit $?\n");
-    let _ = writer.write_all(full_cmd.as_bytes());
-    let _ = writer.flush();
-    drop(writer);
+    drop(pair.slave);
     let mut reader = pair.master.try_clone_reader()
         .map_err(|e| mlua::Error::external(format!("reader: {e}")))?;
     let mut output = Vec::new();
@@ -200,10 +199,22 @@ impl SiftLua {
 
     fn register_cache(&self, sift: &Table) -> Result<()> {
         let cache = self.lua.create_table()?;
-        let cache_get = self.lua.create_function(|_, _key: String| {
-            Ok(Value::Nil)
+        let store: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let s1 = std::sync::Arc::clone(&store);
+        let f_has = self.lua.create_function(move |_, key: String| {
+            Ok(s1.lock().unwrap().contains(&key))
         })?;
-        cache.set("get", cache_get)?;
+        cache.set("has", f_has)?;
+
+        let s2 = std::sync::Arc::clone(&store);
+        let f_set = self.lua.create_function(move |_, (key, _val): (String, bool)| {
+            s2.lock().unwrap().push(key);
+            Ok(())
+        })?;
+        cache.set("set", f_set)?;
+
         sift.set("cache", cache)?;
         Ok(())
     }
@@ -330,27 +341,37 @@ impl SiftLua {
     fn register_jq(&self, sift: &Table) -> Result<()> {
         let jq = self.lua.create_table()?;
         let jq_query = self.lua.create_function(|lua, (data, filter): (Value, String)| {
-            let json_str: String = if let Value::String(s) = &data {
-                s.to_str()
-                    .map_err(|e| mlua::Error::external(format!("jq str: {e}")))?
-                    .to_string()
+            let json_val: serde_json::Value = if let Value::String(s) = &data {
+                let s = s.to_str().map_err(|e| mlua::Error::external(format!("jq str: {e}")))?;
+                serde_json::from_str(&s)
+                    .map_err(|e| mlua::Error::external(format!("jq parse: {e}")))?
             } else {
-                let json_val: serde_json::Value = lua.from_value(data)
-                    .map_err(|e| mlua::Error::external(format!("jq convert: {e}")))?;
-                serde_json::to_string(&json_val)
-                    .map_err(|e| mlua::Error::external(format!("jq serialize: {e}")))?
+                lua.from_value(data)
+                    .map_err(|e| mlua::Error::external(format!("jq convert: {e}")))?
             };
-            let output = std::process::Command::new("jaq")
-                .arg(&filter)
-                .arg(json_str)
-                .output()
-                .map_err(|e| mlua::Error::external(format!("jq exec: {e}")))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(mlua::Error::external(format!("jq error: {stderr}")));
+            let (f, errs) = jaq_parse::parse(&filter, jaq_parse::main());
+            if !errs.is_empty() {
+                return Err(mlua::Error::external(format!("jq parse errors: {errs:?}")));
             }
-            let result = String::from_utf8_lossy(&output.stdout).to_string();
-            Ok(result)
+            let f = f.ok_or_else(|| mlua::Error::external("jq: no filter".to_string()))?;
+            let mut ctx = jaq_interpret::ParseCtx::new(Vec::new());
+            let filter = ctx.compile(f);
+            let inputs = RcIter::new(core::iter::empty());
+            let cv = (jaq_interpret::Ctx::new([], &inputs), jaq_interpret::Val::from(json_val));
+            let mut outputs = Vec::new();
+            for val in filter.run(cv) {
+                match val {
+                    Ok(v) => {
+                        let s = format!("{v}");
+                        if let Ok(jv) = serde_json::from_str::<serde_json::Value>(&s) {
+                            outputs.push(jv);
+                        }
+                    },
+                    Err(e) => return Err(mlua::Error::external(format!("jq: {e}"))),
+                }
+            }
+            serde_json::to_string(&outputs)
+                .map_err(|e| mlua::Error::external(format!("jq result: {e}")))
         })?;
         jq.set("query", jq_query)?;
         sift.set("jq", jq)?;
@@ -486,8 +507,9 @@ impl SiftLua {
         ctx.set("cwd", self.ctx.cwd.display().to_string())?;
         ctx.set("cmd_count", self.ctx.cmd_count)?;
         ctx.set("session_id", self.ctx.session_id.clone().unwrap_or_default())?;
+        ctx.set("command", cmd)?;
 
-        // Build args table
+        // Build args table (arguments only, no command name)
         let args_table = self.lua.create_table()?;
         for (i, arg) in args.iter().enumerate() {
             args_table.set(i + 1, arg.clone())?;
@@ -500,11 +522,28 @@ impl SiftLua {
 
         let result: Table = execute.call((ctx, args_table, stdin_val))?;
 
-        let _status: String = result.get("status")?;
+        let status: String = result.get("status")?;
         let output: String = result.get("output").unwrap_or_default();
         let exit_code: i32 = result.get("exit_code").unwrap_or(0);
 
+        // If plugin returned passthrough, execute the real binary
+        if status == "passthrough" {
+            return Self::execute_passthrough(cmd, args);
+        }
+
         Ok((output, exit_code, entry.pattern.clone()))
+    }
+
+    /// Execute a command directly (passthrough — bypass all plugins).
+    fn execute_passthrough(cmd: &str, args: &[String]) -> Result<(String, i32, String)> {
+        let full_cmd = if args.is_empty() {
+            cmd.to_string()
+        } else {
+            format!("{} {}", cmd, args.join(" "))
+        };
+        // Use run_pty to execute the command directly
+        let (output, exit_code) = run_pty(&full_cmd)?;
+        Ok((output, exit_code, "passthrough".to_string()))
     }
 }
 

@@ -11,6 +11,9 @@ cargo build --release
 # Run a command (agent mode)
 ./target/release/sift -c "cat foo.rs"
 
+# With session ID for token tracking
+AI_SESSION=my-session ./target/release/sift -c "cat foo.rs"
+
 # Interactive REPL
 ./target/release/sift --shell
 ```

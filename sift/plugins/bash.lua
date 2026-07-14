@@ -3,10 +3,15 @@
 return {
     name = "__default__",
     priority = -1000,
-    pattern = "",
+    pattern = "__default__",
 
     execute = function(ctx, args, stdin)
-        local cmd = table.concat(args, " ")
+        -- Build full command from context command + args
+        local parts = {ctx.command}
+        for i = 1, #args do
+            parts[#parts + 1] = args[i]
+        end
+        local cmd = table.concat(parts, " ")
         local output, exit_code = sift.exec(cmd)
         return {
             status = "handled",
