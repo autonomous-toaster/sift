@@ -1,0 +1,62 @@
+## 1. Ctx-first API migration
+
+- [ ] 1.1 Add `ctx` as first arg to all `sift.*` register_* functions in `lua.rs`: exec, hash.*, fs.*, json.*, toon.*, jq.*, env.*, classify, log, token_count.
+- [ ] 1.2 Update all built-in plugins (bash.lua, command.lua, reset.lua) to pass ctx as first arg.
+- [ ] 1.3 Update all optional plugins (cat.lua, git_status.lua) to pass ctx as first arg.
+- [ ] 1.4 Update all tests in lua.rs to use new ctx-first signatures.
+
+## 2. Nudge system
+
+- [ ] 2.1 Add nudge accumulator (Vec<String>) to SiftLua runtime.
+- [ ] 2.2 Implement `sift.log.nudge(ctx, msg)` — pushes to accumulator.
+- [ ] 2.3 At end of dispatch(), append accumulated nudges to plugin output as `[sift] <msg>` lines.
+- [ ] 2.4 Automatic nudge on `sift.exec()` non-zero exit: store raw output, emit `[sift] use 'command cat <path>' for raw output`.
+- [ ] 2.5 Automatic nudge on plugin returning `status = "unchanged"`: emit bypass hint.
+
+## 3. Store primitive
+
+- [ ] 3.1 Implement `sift.store(ctx, content, slug)` — write to `/tmp/sift/<session>/<ts>_<count>_<slug>`, return path, emit nudge.
+
+## 4. sift.json.shortest()
+
+- [ ] 4.1 Implement `sift.json.shortest(ctx, raw, formats)` in Rust: token cost comparison, format selection.
+- [ ] 4.2 Implement compacted JSON output: truncate long strings, summarize large arrays, limit depth/keys.
+- [ ] 4.3 Wire auto-nudge + raw storage when non-raw format wins.
+- [ ] 4.4 Add tests for token cost comparison, format selection, edge cases (non-JSON, empty, tiny JSON).
+
+## 5. Plugin optionalization
+
+- [ ] 5.1 Move cat.lua and git_status.lua from `sift/plugins/` to top-level `plugins/`.
+- [ ] 5.2 Remove cat.lua and git_status.lua from `load_builtin_plugins()` in main.rs.
+- [ ] 5.3 Add `plugins/` directory scan to `load_user_plugins()` or equivalent in main.rs.
+- [ ] 5.4 Implement multi-pattern support: `pattern` accepts `string | string[]` in find_plugin().
+- [ ] 5.5 Change git_status.lua pattern from `"git"` to `"git status"`.
+
+## 6. Optional plugins
+
+- [ ] 6.1 Write `plugins/openspec.lua`: inject --json, convert via sift.json.shortest().
+- [ ] 6.2 Write `plugins/rtk.lua`: delegate docker/podman/kubectl/oc/gh/glab/curl/wget/npm/pnpm/pip/uv to rtk.
+
+## 7. Classifier simplification and cd dispatch
+
+- [ ] 7.1 Remove `CommandKind` enum and `classify_command()` from classifier.rs.
+- [ ] 7.2 Simplify `Classification` struct to `{name, args, is_piped, is_compound}` without `kind`.
+- [ ] 7.3 Update `sift.classify()` Lua binding to return simplified struct.
+- [ ] 7.4 Update classifier tests (remove kind-specific assertions).
+- [ ] 7.5 Implement `cd <dir> && <command>` peel-and-dispatch in the dispatch function.
+- [ ] 7.6 Handle recursive cd chains: `cd /x && cd /y && cmd`.
+- [ ] 7.7 Handle `pushd <dir> && <command>` and `popd`.
+- [ ] 7.8 Handle `cd <dir> ; <command>` (semicolon separator).
+
+## 8. Pipeline optimization
+
+- [ ] 8.1 Parse pipeline structure from classified command in dispatch.
+- [ ] 8.2 If last command matches a plugin, run preceding commands in bash, pipe to plugin.
+- [ ] 8.3 If last command does not match a plugin, fall through to bash for whole pipeline.
+- [ ] 8.4 Update cat.lua to handle piped stdin (cache by hash, return unchanged on repeat).
+- [ ] 8.5 Update dispatch in agent_mode and repl_mode to use classifier for pipeline detection.
+
+## 9. Migration and cleanup
+
+- [ ] 9.1 Update docs/examples/ to reflect new plugin locations and ctx-first signatures.
+- [ ] 9.2 Verify `just ci` passes with all changes.
