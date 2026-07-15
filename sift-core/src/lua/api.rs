@@ -641,7 +641,7 @@ impl SiftLua {
             let filename = msg.split_whitespace().nth(1).unwrap_or("").to_string();
             if !filename.is_empty() {
                 if let Ok(mut guard) = self.nudges.lock() {
-                    guard.push(format!("cached: 'command cat {filename}'"));
+                    guard.push(format!("bypass: 'command cat {filename}'"));
                 }
             }
             msg
