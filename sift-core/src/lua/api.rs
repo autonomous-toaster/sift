@@ -1,9 +1,10 @@
-use super::{exec_command, find_real_bash, save_output, PluginEntry, SiftLua};
+use super::{exec_command, find_real_bash, save_output, PluginEntry, SiftLua, TransformFn};
 use crate::classifier::classify;
 use anyhow::{Context, Result};
 use jaq_interpret::{FilterT, RcIter};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 use sha2::Digest;
+use std::io::Write;
 
 impl SiftLua {
     pub(crate) fn register_sift_table(&self) -> Result<()> {
@@ -16,6 +17,7 @@ impl SiftLua {
         self.register_jq(&sift)?;
         self.register_env(&sift)?;
         self.register_classify(&sift)?;
+        self.register_diff(&sift)?;
         self.register_store(&sift)?;
         self.register_nudge(&sift)?;
         self.register_meta(&sift)?;
@@ -27,8 +29,24 @@ impl SiftLua {
         let session_id = self.ctx.session_id.clone().unwrap_or_default();
         let cmd_count = self.ctx.cmd_count;
         let nudges = self.nudges.clone();
-        let exec_fn = self.lua.create_function(move |_, (_ctx, cmd): (Table, String)| {
-            let (stdout, stderr, exit_code) = exec_command(&cmd, &session_id, cmd_count)?;
+        let lua = self.lua.clone();
+        let exec_fn = self.lua.create_function(move |_, (_ctx, cmd, opts): (Table, String, Option<Table>)| {
+            // Extract optional transform function from opts
+            let transform: Option<TransformFn> = opts.as_ref()
+                .and_then(|t| t.get::<mlua::Function>("transform").ok())
+                .map(|func| {
+                    let lua_clone = lua.clone();
+                    let key = lua.create_registry_value(func)
+                        .expect("failed to store transform in registry");
+                    Box::new(move |chunk: &str| -> String {
+                        lua_clone.registry_value::<mlua::Function>(&key)
+                            .ok()
+                            .and_then(|f| f.call::<String>(chunk).ok())
+                            .unwrap_or_else(|| chunk.to_string())
+                    }) as TransformFn
+                });
+
+            let (stdout, stderr, exit_code) = exec_command(&cmd, &session_id, cmd_count, transform)?;
             let combined = format!("{stdout}{stderr}");
             // On-error save with auto-nudge
             if exit_code != 0 {
@@ -100,9 +118,16 @@ impl SiftLua {
 
     fn register_cache(&self, sift: &Table) -> Result<()> {
         let cache = self.lua.create_table()?;
+        self.register_cache_in_memory(&cache)?;
+        self.register_cache_file_ops(&cache)?;
+        sift.set("cache", cache)?;
+        Ok(())
+    }
+
+    /// Register in-memory cache operations: has, set, reset (per-invocation).
+    fn register_cache_in_memory(&self, cache: &Table) -> Result<()> {
         let store: Option<std::sync::Arc<crate::session::SessionStore>> = self.store.clone();
 
-        // sift.cache.has(ctx, key) -> bool
         let f_has = self.lua.create_function(move |_, (ctx, key): (Table, String)| {
             let session_id: String = ctx.get("session_id")?;
             store.as_ref().map_or_else(|| Ok(false), |s| {
@@ -114,7 +139,6 @@ impl SiftLua {
         })?;
         cache.set("has", f_has)?;
 
-        // sift.cache.set(ctx, key)
         let store2 = self.store.clone();
         let f_set = self.lua.create_function(move |_, (ctx, key): (Table, String)| {
             let session_id: String = ctx.get("session_id")?;
@@ -126,7 +150,6 @@ impl SiftLua {
         })?;
         cache.set("set", f_set)?;
 
-        // sift.cache.reset(ctx)
         let store3 = self.store.clone();
         let f_reset = self.lua.create_function(move |_, ctx: Table| {
             let session_id: String = ctx.get("session_id")?;
@@ -137,8 +160,176 @@ impl SiftLua {
             Ok(())
         })?;
         cache.set("reset", f_reset)?;
+        Ok(())
+    }
 
-        sift.set("cache", cache)?;
+    /// Register file-based cache operations: `has_file`, `store_file`, `load_file`, `cleanup`, `clear_all`.
+    /// These persist across invocations within the same `AI_SESSION`.
+    fn register_cache_file_ops(&self, cache: &Table) -> Result<()> {
+        self.register_cache_file_has(cache)?;
+        self.register_cache_file_store(cache)?;
+        self.register_cache_file_load(cache)?;
+        self.register_cache_path_hash(cache)?;
+        self.register_cache_cleanup(cache)?;
+        self.register_cache_clear_all(cache)?;
+        Ok(())
+    }
+
+    fn register_cache_file_has(&self, cache: &Table) -> Result<()> {
+        let f = self.lua.create_function(|_, (ctx, hash): (Table, String)| {
+            let session_id: String = ctx.get("session_id")?;
+            let marker_path = std::path::PathBuf::from("/tmp/sift")
+                .join(&session_id).join("cache").join(&hash);
+            Ok(marker_path.exists())
+        })?;
+        cache.set("has_file", f)?;
+        Ok(())
+    }
+
+    fn register_cache_file_store(&self, cache: &Table) -> Result<()> {
+        let f = self.lua.create_function(|_, (ctx, hash, content): (Table, String, String)| {
+            let session_id: String = ctx.get("session_id")?;
+            let base = std::path::PathBuf::from("/tmp/sift").join(&session_id);
+
+            let objects_dir = base.join("objects");
+            std::fs::create_dir_all(&objects_dir)
+                .map_err(|e| mlua::Error::external(format!("store objects dir: {e}")))?;
+            let object_path = objects_dir.join(format!("sha256-{hash}.txt"));
+            std::fs::write(&object_path, &content)
+                .map_err(|e| mlua::Error::external(format!("store object: {e}")))?;
+
+            let cache_dir = base.join("cache");
+            std::fs::create_dir_all(&cache_dir)
+                .map_err(|e| mlua::Error::external(format!("store cache dir: {e}")))?;
+            let marker_path = cache_dir.join(&hash);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let meta = serde_json::json!({
+                "created_at": now,
+                "size": content.len()
+            });
+            std::fs::write(&marker_path, meta.to_string())
+                .map_err(|e| mlua::Error::external(format!("store marker: {e}")))?;
+
+            Ok(())
+        })?;
+        cache.set("store_file", f)?;
+        Ok(())
+    }
+
+    fn register_cache_file_load(&self, cache: &Table) -> Result<()> {
+        let f = self.lua.create_function(|_, (ctx, hash): (Table, String)| {
+            let session_id: String = ctx.get("session_id")?;
+            let object_path = std::path::PathBuf::from("/tmp/sift")
+                .join(&session_id).join("objects").join(format!("sha256-{hash}.txt"));
+            std::fs::read_to_string(&object_path).map_or_else(|_| Ok(None), |content| Ok(Some(content)))
+        })?;
+        cache.set("load_file", f)?;
+        Ok(())
+    }
+
+    fn register_cache_path_hash(&self, cache: &Table) -> Result<()> {
+        // sift.cache.set_path_hash(ctx, path, hash)
+        let f_set = self.lua.create_function(|_, (ctx, path, hash): (Table, String, String)| {
+            let session_id: String = ctx.get("session_id")?;
+            let path_hash = hex::encode(sha2::Sha256::digest(path.as_bytes()));
+            let marker_path = std::path::PathBuf::from("/tmp/sift")
+                .join(&session_id).join("paths").join(&path_hash);
+            if let Some(parent) = marker_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&marker_path, &hash)
+                .map_err(|e| mlua::Error::external(format!("set path hash: {e}")))?;
+            Ok(())
+        })?;
+        cache.set("set_path_hash", f_set)?;
+
+        // sift.cache.get_path_hash(ctx, path) -> string|nil
+        let f_get = self.lua.create_function(|_, (ctx, path): (Table, String)| {
+            let session_id: String = ctx.get("session_id")?;
+            let path_hash = hex::encode(sha2::Sha256::digest(path.as_bytes()));
+            let marker_path = std::path::PathBuf::from("/tmp/sift")
+                .join(&session_id).join("paths").join(&path_hash);
+            std::fs::read_to_string(&marker_path).map_or_else(|_| Ok(None), |h| Ok(Some(h.trim().to_string())))
+        })?;
+        cache.set("get_path_hash", f_get)?;
+        Ok(())
+    }
+
+    fn register_cache_cleanup(&self, cache: &Table) -> Result<()> {
+        let f = self.lua.create_function(|_, (ctx, max_age_ms): (Table, Option<u64>)| {
+            let session_id: String = ctx.get("session_id")?;
+            let base = std::path::PathBuf::from("/tmp/sift").join(&session_id);
+            let max_age = u128::from(max_age_ms.unwrap_or(86_400_000));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+
+            let cache_dir = base.join("cache");
+            let mut active_hashes: Vec<String> = Vec::new();
+
+            if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+                for entry in entries.flatten() {
+                    let fname = entry.file_name();
+                    let fname_str = fname.to_string_lossy().to_string();
+                    if let Ok(meta_str) = std::fs::read_to_string(entry.path()) {
+                        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str) {
+                            let created = meta["created_at"].as_u64().unwrap_or(0);
+                            if now.saturating_sub(u128::from(created)) > max_age {
+                                let _ = std::fs::remove_file(entry.path());
+                                let obj_path = base.join("objects").join(format!("sha256-{fname_str}.txt"));
+                                let _ = std::fs::remove_file(&obj_path);
+                                continue;
+                            }
+                        }
+                    }
+                    active_hashes.push(fname_str);
+                }
+            }
+
+            let objects_dir = base.join("objects");
+            if let Ok(entries) = std::fs::read_dir(&objects_dir) {
+                for entry in entries.flatten() {
+                    let fname = entry.file_name().to_string_lossy().to_string();
+                    if let Some(hash) = fname.strip_prefix("sha256-").and_then(|s| s.strip_suffix(".txt")) {
+                        if !active_hashes.contains(&hash.to_string()) {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+
+            Ok(())
+        })?;
+        cache.set("cleanup", f)?;
+        Ok(())
+    }
+
+    fn register_cache_clear_all(&self, cache: &Table) -> Result<()> {
+        let f = self.lua.create_function(|_, ctx: Table| {
+            let session_id: String = ctx.get("session_id")?;
+            let base = std::path::PathBuf::from("/tmp/sift").join(&session_id);
+
+            let cache_dir = base.join("cache");
+            if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+
+            let objects_dir = base.join("objects");
+            if let Ok(entries) = std::fs::read_dir(&objects_dir) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+
+            Ok(())
+        })?;
+        cache.set("clear_all", f)?;
         Ok(())
     }
 
@@ -430,6 +621,18 @@ impl SiftLua {
         Ok(())
     }
 
+    fn register_diff(&self, sift: &Table) -> Result<()> {
+        let diff_fn = self.lua.create_function(|_, (_ctx, old, new): (Table, String, String)| {
+            let diff = similar::TextDiff::from_lines(&old, &new)
+                .unified_diff()
+                .context_radius(3)
+                .to_string();
+            Ok(diff)
+        })?;
+        sift.set("diff", diff_fn)?;
+        Ok(())
+    }
+
     fn register_meta(&self, sift: &Table) -> Result<()> {
         let meta = self.lua.create_table()?;
         let ctx = self.ctx.clone();
@@ -652,12 +855,26 @@ impl SiftLua {
         }
 
         let final_output = if status == "unchanged" {
-            self.handle_unchanged(&result)
+            let msg = Self::handle_unchanged(&result);
+            // Write unchanged message directly to stdout (for real-time visibility)
+            print!("{msg}");
+            let _ = std::io::stdout().flush();
+            msg
         } else {
+            // Write handled output directly to stdout
+            if !output.is_empty() {
+                print!("{output}");
+                let _ = std::io::stdout().flush();
+            }
             output
         };
 
         let nudge_text = self.collect_nudges();
+        // Write nudges directly to stdout (for real-time visibility)
+        if !nudge_text.is_empty() {
+            print!("{nudge_text}");
+            let _ = std::io::stdout().flush();
+        }
         let final_output = if nudge_text.is_empty() {
             final_output
         } else {
@@ -698,14 +915,8 @@ impl SiftLua {
     }
 
     /// Handle `status = "unchanged"` result: emit bypass nudge and return message.
-    fn handle_unchanged(&self, result: &Table) -> String {
+    fn handle_unchanged(result: &Table) -> String {
         let msg: String = result.get("message").unwrap_or_default();
-        let filename = msg.split_whitespace().nth(1).unwrap_or("").to_string();
-        if !filename.is_empty() {
-            if let Ok(mut guard) = self.nudges.lock() {
-                guard.push(format!("bypass: 'command cat {filename}'"));
-            }
-        }
         msg
     }
 
@@ -717,7 +928,7 @@ impl SiftLua {
             format!("{} {}", cmd, args.join(" "))
         };
         // Use exec_command to execute the command directly
-        let (stdout, stderr, exit_code) = exec_command(&full_cmd, "", 0)?;
+        let (stdout, stderr, exit_code) = exec_command(&full_cmd, "", 0, None)?;
         let combined = format!("{stdout}{stderr}");
         Ok((combined, exit_code, "passthrough".to_string()))
     }

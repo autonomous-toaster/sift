@@ -11,7 +11,7 @@ cargo build --release
 # Run a command (agent mode)
 ./target/release/sift -c "cat foo.rs"
 
-# With session ID for token tracking
+# With session ID for cross-invocation caching
 AI_SESSION=my-session ./target/release/sift -c "cat foo.rs"
 
 # Interactive REPL
@@ -28,12 +28,18 @@ User runs: cat foo.rs
        │
        ├── cat.lua (plugin) intercepts "cat"
        │     ├── reads file via sift.fs.read(ctx, path)
-       │     ├── checks cache via sift.hash.sha256(ctx, data)
-       │     ├── cache hit → "[sift] foo.rs unchanged"
-       │     └── cache miss → returns file content
+       │     ├── sha256 hash → check file-based cache
+       │     ├── cache hit → "[sift] foo.rs unchanged" + bypass nudge
+       │     └── cache miss → store content by hash, return content
+       │
+       ├── sift-read.lua (plugin) intercepts "sift-read"
+       │     ├── supports offset/limit for range reads
+       │     ├── --fresh flag bypasses cache
+       │     ├── on cache miss: loads old content, emits unified diff
+       │     └── shares cache with cat.lua (cross-plugin dedup)
        │
        └── bash.lua (default fallback) runs via PTY
-             └── returns raw output as-is
+             └── output streams to stdout in real-time
 ```
 
 ## Lua plugin API
@@ -75,30 +81,39 @@ return {
 | `command.lua` | 1000 | `"command"` | Bypass mechanism — `command cat foo` runs real `cat` |
 | `reset.lua` | 1000 | `"reset"` | Clear sift cache for current session |
 | `cat.lua` | 0 | `"cat"` | Caches file reads + piped stdin, returns "unchanged" on cache hit |
-| `git_status.lua` | 0 | `"git status"` | Fingerprints output, returns "working tree clean" |
 | `bash.lua` | -1000 | `"__default__"` | Default fallback — runs command via bash |
 
 ### Shipped optional plugins (`plugins/`)
 
-| Plugin | Pattern(s) | Description |
-|--------|------------|-------------|
+| Plugin | Pattern | Description |
+|--------|---------|-------------|
+| `sift-read.lua` | `"sift-read"` | File read with offset/limit, hash caching, unified diff on change, `--fresh` bypass |
+| `cat.lua` | `"cat"` | File read caching (shares cache with sift-read) |
 | `openspec.lua` | `"openspec"` | Injects `--json` flag, converts output via `sift.json.shortest()` |
-| `rtk.lua` | `["docker", "podman", "kubectl", "oc", "gh", "glab", "curl", "wget", "npm", "pnpm", "pip", "uv"]` | Delegates matching commands to `rtk` binary |
+| `rtk.lua` | `"*"` (wildcard) | Delegates unmatched commands to `rtk` binary |
 
 ### `sift.*` API reference
 
 All functions take `ctx` as first argument for API consistency.
 
 ```
-sift.exec(ctx, cmd)               → output, stderr, exit_code
-sift.log(ctx, level, msg)         -- "info"|"warn"|"error"|"debug"
-sift.log.nudge(ctx, msg)          -- accumulate nudge message
+sift.exec(ctx, cmd, {transform?}) → output, stderr, exit_code
+  -- transform: optional function(chunk) → string for streaming transforms
+sift.log.{info,warn,error,debug}(ctx, msg)
+sift.nudge(ctx, msg)              -- accumulate nudge message
 sift.exit(ctx, code)              -- exit process
-sift.output(ctx, text)            -- emit text to agent
+sift.output(ctx, text)            -- emit text to stdout
 
-sift.cache.has(ctx, key)          → boolean
+sift.cache.has(ctx, key)          → boolean (in-memory, per-invocation)
 sift.cache.set(ctx, key)          -- set cached key
-sift.cache.reset(ctx)             -- clear all cache for session
+sift.cache.reset(ctx)             -- clear in-memory cache
+sift.cache.has_file(ctx, hash)    → boolean (file-based, persists across invocations)
+sift.cache.store_file(ctx, hash, content)  -- persist content + create cache marker
+sift.cache.load_file(ctx, hash)   → string|nil (load content by hash)
+sift.cache.set_path_hash(ctx, path, hash)  -- track path → last hash
+sift.cache.get_path_hash(ctx, path)        → string|nil
+sift.cache.cleanup(ctx, max_age_ms?)       -- prune expired entries + orphan objects
+sift.cache.clear_all(ctx)         -- delete all cache markers and objects
 
 sift.hash.sha256(ctx, data)       → hex string
 sift.hash.md5(ctx, data)          → hex string
@@ -115,6 +130,8 @@ sift.json.shortest(ctx, raw, formats)  → token-optimized JSON
 sift.toon.encode(ctx, val)        → TOON string (token-optimized)
 sift.toon.decode(ctx, str)        → Lua table
 sift.jq.query(ctx, data, filter)  → JSON result
+
+sift.diff(ctx, old, new)          → unified diff string (via similar crate)
 
 sift.store(ctx, content, slug)    → path (writes to /tmp/sift/<session>/, emits nudge)
 
@@ -152,38 +169,86 @@ local output = sift.json.shortest(ctx, raw_json, formats)
 
 Nudges tell the agent how to access original/unfiltered content:
 
-- **Explicit**: `sift.log.nudge(ctx, "msg")` — accumulate during plugin execution
+- **Explicit**: `sift.nudge(ctx, "msg")` — accumulate during plugin execution
 - **Auto on error**: `sift.exec()` non-zero exit → stores raw output, nudges path
-- **Auto on unchanged**: plugin returns `status = "unchanged"` → nudges cached filename
+- **Auto on unchanged**: plugin returns `status = "unchanged"` → plugin emits own bypass nudge
 - **Auto on json.shortest**: non-raw format wins → stores raw original, nudges path
 - **Auto on store**: `sift.store()` → nudges stored file path
 
 Nudges are appended to plugin output as `[sift] <msg>` lines at end of dispatch.
+
+## sift-read plugin
+
+The `sift-read` plugin provides hash-based file reading with range support and diff emission:
+
+```bash
+# First read — caches content
+sift-read Cargo.toml
+
+# Second read — "unchanged" with bypass nudge
+sift-read Cargo.toml
+# → [sift] Cargo.toml unchanged since last read
+# → [sift] bypass: 'sift-read --fresh Cargo.toml'
+
+# Range read
+sift-read Cargo.toml 5 10
+# → [sift] Cargo.toml lines 5-14 unchanged
+
+# Bypass cache
+sift-read --fresh Cargo.toml
+
+# After file edit — emits unified diff
+sift-read Cargo.toml
+# → @@ -24,4 +24,5 @@
+# →  ...
+```
+
+Shares cache with `cat` plugin — `cat file.txt` then `sift-read file.txt` detects "unchanged" and vice versa.
+
+## Streaming output
+
+All command output streams to stdout/stderr in real-time via background reader threads. Plugins can transform chunks in-flight:
+
+```lua
+-- Raw streaming (default)
+local output = sift.exec(ctx, "docker ps")
+
+-- Transformed streaming
+local output = sift.exec(ctx, "cat file.txt", {
+    transform = function(chunk)
+        return string.upper(chunk)
+    end
+})
+```
+
+## Content-addressed cache
+
+File content is stored by sha256 hash at `/tmp/sift/<session>/`:
+
+```
+/tmp/sift/<session>/
+├── cache/          # Cache markers: <hash> → {"created_at": <ms>, "size": <bytes>}
+├── objects/        # File content: sha256-<hash>.txt
+└── paths/          # Path-to-hash mapping: <path_hash> → <content_hash>
+```
+
+- Persists across `sift -c` invocations within the same `AI_SESSION`
+- Auto-prunes entries older than 24h on each invocation
+- `reset` plugin clears all cache data
+- Sensitive paths (`.env*`, `*.pem`, etc.) bypass caching
 
 ## Plugin loading order
 
 sift loads plugins from these locations (later overrides earlier at same priority):
 
 1. **Built-in** — `bash.lua`, `command.lua`, `reset.lua` (embedded in binary)
-2. **`plugins/`** — shipped optional plugins (`cat.lua`, `git_status.lua`, `openspec.lua`, `rtk.lua`)
+2. **`plugins/`** — shipped optional plugins (`cat.lua`, `sift-read.lua`, `openspec.lua`, `rtk.lua`)
 3. **`~/.config/sift/plugins/`** — user plugins
 4. **`$SIFT_PLUGINS`** — colon-separated paths
 
-## Multi-pattern plugins
+## Wildcard pattern
 
-Plugins can match multiple commands using an array of patterns:
-
-```lua
-return {
-    name = "rtk",
-    pattern = {"docker", "podman", "kubectl", "gh"},
-    execute = function(ctx, args, stdin)
-        -- matches any of: docker, podman, kubectl, gh
-    end
-}
-```
-
-Longest-prefix matching ensures specific patterns (e.g., `"git status"`) beat generic ones (e.g., `"git"`).
+Plugins with `pattern = "*"` match any command not handled by a more specific plugin. Used by `rtk.lua` to delegate all unmatched commands to the `rtk` binary. Specific patterns (e.g., `"cat"`) always beat wildcard via longest-pattern sorting.
 
 ## Pipeline optimization
 
@@ -217,30 +282,10 @@ cat foo.rs
 command cat foo.rs
 ```
 
-This reuses existing bash semantics — `command` already means "bypass shell-defined behavior." In sift, plugins ARE shell-defined behavior.
-
-## Token reduction tracking
-
-sift tracks token reduction per command and stores metrics in `~/.sift/sessions.db`:
-
-```
-raw_bytes: 15200
-filtered_bytes: 420
-reduction: 97.2%
-plugin: cargo_test
-```
-
-## Example plugins
-
-See `docs/examples/` for plugin examples:
-
-- [`cat.lua`](docs/examples/cat.lua) — File read caching with hash-based dedup + piped stdin support
-- [`cargo_test.lua`](docs/examples/cargo_test.lua) — Test output optimization with jq + TOON
-
-Install examples by copying to `plugins/` or `~/.config/sift/plugins/`:
+For sift-read, use `--fresh` flag:
 
 ```bash
-cp docs/examples/cat.lua plugins/
+sift-read --fresh foo.rs
 ```
 
 ## Project structure
@@ -249,7 +294,7 @@ cp docs/examples/cat.lua plugins/
 sift/
 ├── plugins/             # Shipped optional plugins (filesystem-loaded)
 │   ├── cat.lua
-│   ├── git_status.lua
+│   ├── sift-read.lua
 │   ├── openspec.lua
 │   └── rtk.lua
 ├── sift-core/           # Core library: Lua runtime, session store, classifier

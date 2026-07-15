@@ -28,6 +28,7 @@ jaq-parse = { workspace = true }
 jaq-syn = { workspace = true }
 jaq-interpret = { workspace = true }
 regex-lite = "0.1"
+similar = "2"
 tokio = { workspace = true }
 
 [dev-dependencies]

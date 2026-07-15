@@ -4,6 +4,7 @@
 //! and handles plugin loading and dispatch.
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -36,11 +37,21 @@ pub(crate) fn find_real_bash() -> PathBuf {
     PathBuf::from("/bin/bash")
 }
 
-/// Execute a command via PTY and return `(output_string, exit_code)`.
+/// Transform function for streaming output: receives a chunk, returns (possibly modified) chunk.
+pub(crate) type TransformFn = Box<dyn Fn(&str) -> String + Send>;
+
 /// Execute a command via `std::process::Command` with pipes and return `(stdout, stderr, exit_code)`.
-pub(crate) fn exec_command(cmd: &str, _session_id: &str, _cmd_count: u64) -> Result<(String, String, i32), mlua::Error> {
+///
+/// Streams stdout/stderr to the real stdout/stderr in real-time while collecting for the return value.
+/// If `transform` is provided, each stdout chunk is passed through it before writing and collecting.
+pub(crate) fn exec_command(
+    cmd: &str,
+    _session_id: &str,
+    _cmd_count: u64,
+    transform: Option<TransformFn>,
+) -> Result<(String, String, i32), mlua::Error> {
     let bash_path = find_real_bash();
-    let output = std::process::Command::new(&bash_path)
+    let mut child = std::process::Command::new(&bash_path)
         .arg("-c")
         .arg(cmd)
         .env("PAGER", "cat")
@@ -50,12 +61,75 @@ pub(crate) fn exec_command(cmd: &str, _session_id: &str, _cmd_count: u64) -> Res
         .env("GIT_PAGER", "cat")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .output()
+        .spawn()
         .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(1);
+    let stdout_pipe = child.stdout.take()
+        .ok_or_else(|| mlua::Error::external("no stdout pipe".to_string()))?;
+    let stderr_pipe = child.stderr.take()
+        .ok_or_else(|| mlua::Error::external("no stderr pipe".to_string()))?;
+
+    let stdout_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let stderr_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+
+    let stdout_buf_clone = Arc::clone(&stdout_buf);
+    let stdout_handle = std::thread::spawn(move || {
+        let mut reader = stdout_pipe;
+        let mut chunk = [0u8; 4096];
+        let mut collected = String::new();
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let s = String::from_utf8_lossy(&chunk[..n]).to_string();
+                    let output = transform.as_ref().map_or_else(|| s.clone(), |t| t(&s));
+                    print!("{output}");
+                    let _ = std::io::stdout().flush();
+                    collected.push_str(&output);
+                }
+                Err(e) => {
+                    eprintln!("sift: stdout read error: {e}");
+                    break;
+                }
+            }
+        }
+        if let Ok(mut guard) = stdout_buf_clone.lock() {
+            *guard = collected;
+        }
+    });
+
+    let stderr_buf_clone = Arc::clone(&stderr_buf);
+    let stderr_handle = std::thread::spawn(move || {
+        let mut reader = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        let mut collected = String::new();
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let s = String::from_utf8_lossy(&chunk[..n]).to_string();
+                    eprint!("{s}");
+                    let _ = std::io::stderr().flush();
+                    collected.push_str(&s);
+                }
+                Err(e) => {
+                    eprintln!("sift: stderr read error: {e}");
+                    break;
+                }
+            }
+        }
+        if let Ok(mut guard) = stderr_buf_clone.lock() {
+            *guard = collected;
+        }
+    });
+
+    let status = child.wait().map_err(|e| mlua::Error::external(format!("wait: {e}")))?;
+    let _ = stdout_handle.join();
+    let _ = stderr_handle.join();
+
+    let stdout = stdout_buf.lock().map(|g| g.clone()).unwrap_or_default();
+    let stderr = stderr_buf.lock().map(|g| g.clone()).unwrap_or_default();
+    let exit_code = status.code().unwrap_or(1);
 
     Ok((stdout, stderr, exit_code))
 }
@@ -75,6 +149,52 @@ pub(crate) fn save_output(cmd: &str, session_id: &str, cmd_count: u64, output: &
     let log_path = tmp_dir.join(format!("{ts}_{cmd_count}_{slug}.log"));
     let _ = std::fs::write(&log_path, output);
     log_path.display().to_string()
+}
+
+/// Clean up expired cache entries and orphan objects for a session.
+/// Runs at startup to prevent unbounded cache growth.
+pub fn cleanup_cache(session_id: &str, max_age_ms: u64) {
+    let base = std::path::PathBuf::from("/tmp/sift").join(session_id);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    let cache_dir = base.join("cache");
+    let mut active_hashes: Vec<String> = Vec::new();
+
+    // Scan cache markers, delete expired
+    if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let fname_str = fname.to_string_lossy().to_string();
+            if let Ok(meta_str) = std::fs::read_to_string(entry.path()) {
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str) {
+                    let created = meta["created_at"].as_u64().unwrap_or(0);
+                    if now.saturating_sub(u128::from(created)) > u128::from(max_age_ms) {
+                        let _ = std::fs::remove_file(entry.path());
+                        let obj_path = base.join("objects").join(format!("sha256-{fname_str}.txt"));
+                        let _ = std::fs::remove_file(&obj_path);
+                        continue;
+                    }
+                }
+            }
+            active_hashes.push(fname_str);
+        }
+    }
+
+    // Scan objects, delete orphans
+    let objects_dir = base.join("objects");
+    if let Ok(entries) = std::fs::read_dir(&objects_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if let Some(hash) = fname.strip_prefix("sha256-").and_then(|s| s.strip_suffix(".txt")) {
+                if !active_hashes.contains(&hash.to_string()) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
 }
 
 /// The sift Lua runtime, holding the VM and registered API.
@@ -456,7 +576,7 @@ mod tests {
 
     #[test]
     fn test_exec_command() {
-        let (stdout, stderr, code) = exec_command("echo hello", "test", 0).unwrap();
+        let (stdout, stderr, code) = exec_command("echo hello", "test", 0, None).unwrap();
         assert!(stdout.contains("hello"), "stdout should contain hello, got: {stdout}");
         assert!(stderr.is_empty(), "stderr should be empty, got: {stderr}");
         assert_eq!(code, 0);
@@ -464,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_exec_command_with_stderr() {
-        let (stdout, stderr, code) = exec_command("echo out && echo err >&2", "test", 0).unwrap();
+        let (stdout, stderr, code) = exec_command("echo out && echo err >&2", "test", 0, None).unwrap();
         assert!(stdout.contains("out"), "stdout should contain out, got: {stdout}");
         assert!(stderr.contains("err"), "stderr should contain err, got: {stderr}");
         assert_eq!(code, 0);
@@ -472,7 +592,7 @@ mod tests {
 
     #[test]
     fn test_exec_command_exit_code() {
-        let (_stdout, _stderr, code) = exec_command("exit 42", "test", 0).unwrap();
+        let (_stdout, _stderr, code) = exec_command("exit 42", "test", 0, None).unwrap();
         assert_eq!(code, 42, "exit code should be 42, got {code}");
     }
 
@@ -593,6 +713,7 @@ mod tests {
                 priority = 0,
                 pattern = "test-cmd",
                 execute = function(ctx, args, stdin)
+                    sift.nudge(ctx, "bypass: 'command cat foo.rs'")
                     return { status = "unchanged", message = "[sift] foo.rs unchanged since last read" }
                 end
             }
@@ -602,5 +723,62 @@ mod tests {
         assert!(output.contains("[sift] foo.rs unchanged since last read"), "output: {output}");
         assert!(output.contains("bypass: 'command cat foo.rs'"), "output: {output}");
         assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn test_cleanup_cache() {
+        let session_id = "test-cleanup";
+        let base = std::path::PathBuf::from("/tmp/sift").join(session_id);
+        let cache_dir = base.join("cache");
+        let objects_dir = base.join("objects");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // Create a fresh cache entry
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::create_dir_all(&objects_dir).unwrap();
+        let meta = serde_json::json!({"created_at": 1_000_000_000_000u64, "size": 10});
+        std::fs::write(cache_dir.join("abc123"), meta.to_string()).unwrap();
+        std::fs::write(objects_dir.join("sha256-abc123.txt"), "content").unwrap();
+
+        // Create an orphan object (no cache entry)
+        std::fs::write(objects_dir.join("sha256-orphan.txt"), "orphan").unwrap();
+
+        // Run cleanup with very short TTL (1ms) — should delete everything
+        super::cleanup_cache(session_id, 1);
+
+        // Cache entry should be deleted (expired)
+        assert!(!cache_dir.join("abc123").exists(), "expired cache entry should be deleted");
+        // Orphan object should be deleted
+        assert!(!objects_dir.join("sha256-orphan.txt").exists(), "orphan object should be deleted");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_cleanup_cache_preserves_fresh() {
+        let session_id = "test-cleanup-fresh";
+        let base = std::path::PathBuf::from("/tmp/sift").join(session_id);
+        let cache_dir = base.join("cache");
+        let objects_dir = base.join("objects");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // Create a fresh cache entry (recent timestamp)
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::create_dir_all(&objects_dir).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let meta = serde_json::json!({"created_at": now, "size": 10});
+        std::fs::write(cache_dir.join("abc123"), meta.to_string()).unwrap();
+        std::fs::write(objects_dir.join("sha256-abc123.txt"), "content").unwrap();
+
+        // Run cleanup with long TTL — should preserve everything
+        super::cleanup_cache(session_id, 86_400_000);
+
+        assert!(cache_dir.join("abc123").exists(), "fresh cache entry should be preserved");
+        assert!(objects_dir.join("sha256-abc123.txt").exists(), "referenced object should be preserved");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 
-use sift_core::lua::{SiftContext, SiftLua};
+use sift_core::lua::{cleanup_cache, SiftContext, SiftLua};
 use sift_core::session::Session;
 
 /// AI-optimized shell proxy — Lua-plugin-based command interception.
@@ -48,6 +48,12 @@ async fn main() -> Result<()> {
     };
 
     let store = session.store.map(std::sync::Arc::new);
+
+    // Clean up expired cache entries at startup
+    if let Some(ref sid) = session.session_id {
+        cleanup_cache(sid, 86_400_000); // 24h default TTL
+    }
+
     let mut lua = SiftLua::new(store, ctx)?;
 
     // Load built-in plugins
@@ -117,12 +123,7 @@ fn load_plugins_from_dir(lua: &mut SiftLua, dir: &PathBuf) {
 
 /// Agent mode: execute a command and output the result.
 fn agent_mode(lua: &SiftLua, cmd: &str) -> Result<()> {
-    let (output, exit_code, _plugin) = lua.dispatch_full(cmd, None)?;
-
-    if !output.is_empty() {
-        io::stdout().write_all(output.as_bytes())?;
-        io::stdout().flush()?;
-    }
+    let (_output, exit_code, _plugin) = lua.dispatch_full(cmd, None)?;
 
     std::process::exit(exit_code);
 }
