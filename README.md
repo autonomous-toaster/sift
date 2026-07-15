@@ -27,8 +27,8 @@ User runs: cat foo.rs
   sift parses and classifies the command
        │
        ├── cat.lua (plugin) intercepts "cat"
-       │     ├── reads file via sift.fs.read()
-       │     ├── checks cache via sift.hash.sha256()
+       │     ├── reads file via sift.fs.read(ctx, path)
+       │     ├── checks cache via sift.hash.sha256(ctx, data)
        │     ├── cache hit → "[sift] foo.rs unchanged"
        │     └── cache miss → returns file content
        │
@@ -41,13 +41,13 @@ User runs: cat foo.rs
 Plugins are Lua scripts that return a table with `name`, `priority`, `pattern`, and `execute` function.
 
 ```lua
--- ~/.config/sift/plugins/my_plugin.lua
+-- plugins/my_plugin.lua or ~/.config/sift/plugins/my_plugin.lua
 return {
     name = "my-command",
     priority = 0,
-    pattern = "my-command",
+    pattern = "my-command",       -- string or string[] for multi-pattern
     execute = function(ctx, args, stdin)
-        -- ctx: { cwd, cmd_count, session_id }
+        -- ctx: { cwd, cmd_count, session_id, command }
         -- args: command arguments (table)
         -- stdin: piped input (string or nil)
         return {
@@ -65,50 +65,64 @@ return {
 |--------|-------------|
 | `"handled"` | Plugin consumed the command. `output` is sent to the agent. |
 | `"passthrough"` | Run the real binary (used by `command` plugin). |
-| `"unchanged"` | Output identical to previous invocation. Emits short marker. |
+| `"unchanged"` | Output identical to previous invocation. Emits short marker + nudge. |
 | `nil, error` | Plugin failed. Falls through to next matching plugin. |
 
 ### Built-in plugins
 
-| Plugin | Priority | Description |
-|--------|----------|-------------|
-| `command.lua` | 1000 | Bypass mechanism — `command cat foo` runs real `cat` |
-| `cat.lua` | 0 | Caches file reads, returns "unchanged" on cache hit |
-| `git_status.lua` | 0 | Fingerprints output, returns "working tree clean" |
-| `bash.lua` | -1000 | Default fallback — runs command via PTY |
+| Plugin | Priority | Pattern | Description |
+|--------|----------|---------|-------------|
+| `command.lua` | 1000 | `"command"` | Bypass mechanism — `command cat foo` runs real `cat` |
+| `reset.lua` | 1000 | `"reset"` | Clear sift cache for current session |
+| `cat.lua` | 0 | `"cat"` | Caches file reads + piped stdin, returns "unchanged" on cache hit |
+| `git_status.lua` | 0 | `"git status"` | Fingerprints output, returns "working tree clean" |
+| `bash.lua` | -1000 | `"__default__"` | Default fallback — runs command via bash |
+
+### Shipped optional plugins (`plugins/`)
+
+| Plugin | Pattern(s) | Description |
+|--------|------------|-------------|
+| `openspec.lua` | `"openspec"` | Injects `--json` flag, converts output via `sift.json.shortest()` |
+| `rtk.lua` | `["docker", "podman", "kubectl", "oc", "gh", "glab", "curl", "wget", "npm", "pnpm", "pip", "uv"]` | Delegates matching commands to `rtk` binary |
 
 ### `sift.*` API reference
 
+All functions take `ctx` as first argument for API consistency.
+
 ```
-sift.exec(cmd)                    → output, exit_code
-sift.log(level, msg)              -- "info"|"warn"|"error"|"debug"
-sift.exit(code)                   -- exit process
-sift.output(text)                 -- emit text to agent
+sift.exec(ctx, cmd)               → output, stderr, exit_code
+sift.log(ctx, level, msg)         -- "info"|"warn"|"error"|"debug"
+sift.log.nudge(ctx, msg)          -- accumulate nudge message
+sift.exit(ctx, code)              -- exit process
+sift.output(ctx, text)            -- emit text to agent
 
-sift.cache.get(key)               → value or nil
-sift.cache.set(key, val)          -- set cached value
-sift.cache.has(key)               → boolean
+sift.cache.has(ctx, key)          → boolean
+sift.cache.set(ctx, key)          -- set cached key
+sift.cache.reset(ctx)             -- clear all cache for session
 
-sift.hash.sha256(data)            → hex string
-sift.hash.md5(data)               → hex string
+sift.hash.sha256(ctx, data)       → hex string
+sift.hash.md5(ctx, data)          → hex string
 
-sift.fs.read(path, {offset?, limit?})  → file content
-sift.fs.write(path, content)      -- write file
-sift.fs.edit(path, edits)         -- apply text replacements
-sift.fs.stat(path)                → {size, is_dir, is_file}
-sift.fs.exists(path)              → boolean
+sift.fs.read(ctx, path, {offset?, limit?})  → file content
+sift.fs.write(ctx, path, content) -- write file
+sift.fs.edit(ctx, path, edits)    -- apply text replacements
+sift.fs.stat(ctx, path)           → {size, is_dir, is_file}
+sift.fs.exists(ctx, path)         → boolean
 
-sift.json.encode(val)             → JSON string
-sift.json.decode(str)             → Lua table
-sift.toon.encode(val)             → TOON string (token-optimized)
-sift.toon.decode(str)             → Lua table
-sift.jq.query(data, filter)       → JSON result (requires `jaq` CLI)
+sift.json.encode(ctx, val)        → JSON string
+sift.json.decode(ctx, str)        → Lua table
+sift.json.shortest(ctx, raw, formats)  → token-optimized JSON
+sift.toon.encode(ctx, val)        → TOON string (token-optimized)
+sift.toon.decode(ctx, str)        → Lua table
+sift.jq.query(ctx, data, filter)  → JSON result
 
-sift.env.get(key)                 → value or nil
-sift.env.set(key, val)            -- set environment variable
+sift.store(ctx, content, slug)    → path (writes to /tmp/sift/<session>/, emits nudge)
 
-sift.classify(cmd)                → {kind, name, args, is_piped, is_compound}
-sift.token_count(text)            → estimated token count
+sift.env.get(ctx, key)            → value or nil
+sift.env.set(ctx, key, val)       -- set environment variable
+
+sift.classify(ctx, cmd)           → {name, args, is_piped, is_compound}
+sift.token_count(ctx, text)       → estimated token count
 
 sift.meta.session_id              -- current session ID
 sift.meta.cmd_count               -- command counter
@@ -116,6 +130,80 @@ sift.meta.cwd                     -- working directory
 sift.meta.raw_bytes               -- raw output size (writable)
 sift.meta.filtered_bytes          -- filtered output size (computed)
 ```
+
+### `sift.json.shortest()` — Token-aware JSON optimization
+
+Selects the most token-efficient JSON representation:
+
+```lua
+local formats = {
+    json = { max_string_len = 80, max_array_items = 10, max_depth = 5, max_keys = 20 },
+    toon = true
+}
+local output = sift.json.shortest(ctx, raw_json, formats)
+```
+
+- Tries raw (compacted), compacted JSON, and TOON formats
+- Measures token cost including nudge overhead
+- Selects the shortest representation
+- Stores raw original to disk and emits nudge when non-raw wins
+
+### Nudge system
+
+Nudges tell the agent how to access original/unfiltered content:
+
+- **Explicit**: `sift.log.nudge(ctx, "msg")` — accumulate during plugin execution
+- **Auto on error**: `sift.exec()` non-zero exit → stores raw output, nudges path
+- **Auto on unchanged**: plugin returns `status = "unchanged"` → nudges cached filename
+- **Auto on json.shortest**: non-raw format wins → stores raw original, nudges path
+- **Auto on store**: `sift.store()` → nudges stored file path
+
+Nudges are appended to plugin output as `[sift] <msg>` lines at end of dispatch.
+
+## Plugin loading order
+
+sift loads plugins from these locations (later overrides earlier at same priority):
+
+1. **Built-in** — `bash.lua`, `command.lua`, `reset.lua` (embedded in binary)
+2. **`plugins/`** — shipped optional plugins (`cat.lua`, `git_status.lua`, `openspec.lua`, `rtk.lua`)
+3. **`~/.config/sift/plugins/`** — user plugins
+4. **`$SIFT_PLUGINS`** — colon-separated paths
+
+## Multi-pattern plugins
+
+Plugins can match multiple commands using an array of patterns:
+
+```lua
+return {
+    name = "rtk",
+    pattern = {"docker", "podman", "kubectl", "gh"},
+    execute = function(ctx, args, stdin)
+        -- matches any of: docker, podman, kubectl, gh
+    end
+}
+```
+
+Longest-prefix matching ensures specific patterns (e.g., `"git status"`) beat generic ones (e.g., `"git"`).
+
+## Pipeline optimization
+
+When the last command in a pipeline matches a plugin, sift runs preceding segments in bash and pipes output to the plugin:
+
+```
+echo abc | cat  →  runs "echo abc" in bash, pipes to cat.lua for caching
+```
+
+If the last command has no matching plugin, the entire pipeline runs in bash.
+
+## cd dispatch
+
+sift handles `cd <dir> && <command>` by peeling the cd prefix, changing directory, and dispatching the rest through plugins:
+
+```
+cd /x && docker ps  →  chdir /x, dispatch "docker ps" through rtk.lua
+```
+
+Supports recursive chains (`cd /x && cd /y && cmd`), `pushd`, `popd`, and semicolon separators.
 
 ## Bypass mechanism
 
@@ -146,46 +234,42 @@ plugin: cargo_test
 
 See `docs/examples/` for plugin examples:
 
-- [`cat.lua`](docs/examples/cat.lua) — File read caching with hash-based dedup
+- [`cat.lua`](docs/examples/cat.lua) — File read caching with hash-based dedup + piped stdin support
 - [`cargo_test.lua`](docs/examples/cargo_test.lua) — Test output optimization with jq + TOON
 
-Install examples by copying to `~/.config/sift/plugins/`:
+Install examples by copying to `plugins/` or `~/.config/sift/plugins/`:
 
 ```bash
-cp docs/examples/cat.lua ~/.config/sift/plugins/
+cp docs/examples/cat.lua plugins/
 ```
-
-## User plugins
-
-sift loads plugins from:
-1. Built-in plugins (embedded in binary)
-2. `~/.config/sift/plugins/*.lua`
-3. `SIFT_PLUGINS` environment variable (colon-separated paths)
-
-User plugins override built-ins at the same priority level.
 
 ## Project structure
 
 ```
 sift/
-├── sift-core/          # Core library: Lua runtime, session store, classifier
+├── plugins/             # Shipped optional plugins (filesystem-loaded)
+│   ├── cat.lua
+│   ├── git_status.lua
+│   ├── openspec.lua
+│   └── rtk.lua
+├── sift-core/           # Core library: Lua runtime, session store, classifier
 │   └── src/
-│       ├── lua.rs      # Lua VM, sift.* API, plugin dispatch
-│       ├── session.rs  # SQLite session store with token tracking
+│       ├── lua/         # Lua VM, sift.* API, plugin dispatch
+│       │   ├── mod.rs
+│       │   └── api.rs
+│       ├── session.rs   # SQLite session store with token tracking
 │       └── classifier.rs  # Command classification via brush-parser
-├── sift/               # Main binary
+├── sift/                # Main binary
 │   ├── src/
-│   │   ├── main.rs     # Entry point, agent/REPL modes
-│   │   └── pty.rs      # PTY management (legacy)
-│   └── plugins/        # Built-in Lua plugins
+│   │   └── main.rs      # Entry point, agent/REPL modes
+│   └── plugins/         # Core built-in plugins (embedded in binary)
 │       ├── bash.lua
-│       ├── cat.lua
 │       ├── command.lua
-│       └── git_status.lua
-├── docs/examples/      # Example user plugins
+│       └── reset.lua
+├── docs/examples/        # Example user plugins
 │   ├── cat.lua
 │   └── cargo_test.lua
-└── openspec/           # OpenSpec change management
+└── openspec/            # OpenSpec change management
 ```
 
 ## Requirements
@@ -193,6 +277,7 @@ sift/
 - Rust 1.75+
 - bash (at `/bin/bash`, `/usr/bin/bash`, or in PATH)
 - Optional: `jaq` CLI for `sift.jq.query()` (`cargo install jaq`)
+- Optional: `rtk` CLI for `rtk.lua` plugin delegation
 
 ## License
 

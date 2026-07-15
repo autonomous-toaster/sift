@@ -2,12 +2,12 @@
 cargo_test.lua — Example sift plugin for `cargo test` output optimization
 
 This plugin demonstrates:
-  - Using sift.exec() to run a command with JSON output
-  - Using sift.jq.query() to filter and transform JSON data
-  - Using sift.toon.encode() for token-optimized output
+  - Using sift.exec(ctx, cmd) to run a command with JSON output
+  - Using sift.jq.query(ctx, data, filter) to filter and transform JSON data
+  - Using sift.toon.encode(ctx, val) for token-optimized output
   - Using sift.meta to report token reduction metrics
 
-Install: copy to ~/.config/sift/plugins/cargo_test.lua
+Install: copy to plugins/cargo_test.lua or ~/.config/sift/plugins/cargo_test.lua
 --]]
 
 return {
@@ -23,13 +23,13 @@ return {
 
         -- Run cargo test with JSON output for machine parsing
         local cmd = "cargo test --message-format=json 2>&1"
-        local raw_output, exit_code = sift.exec(cmd)
+        local raw_output, stderr, exit_code = sift.exec(ctx, cmd)
 
         -- Record raw output size for token tracking
         sift.meta.raw_bytes = #raw_output
 
         -- Parse JSON lines and extract test results using jq
-        local results = sift.jq.query(raw_output, [[
+        local results = sift.jq.query(ctx, raw_output, [[
             [.[] | select(.type == "test") | {
                 name: .name,
                 status: .event,
@@ -38,8 +38,8 @@ return {
         ]])
 
         -- Count passed/failed
-        local passed = sift.jq.query(results, '[.[] | select(.outcome == "passed")] | length')
-        local failed = sift.jq.query(results, '[.[] | select(.outcome == "failed")] | length')
+        local passed = sift.jq.query(ctx, results, '[.[] | select(.outcome == "passed")] | length')
+        local failed = sift.jq.query(ctx, results, '[.[] | select(.outcome == "failed")] | length')
 
         -- Build summary as Lua table
         local summary = {
@@ -49,11 +49,11 @@ return {
         }
 
         -- Encode as TOON for token-optimized output
-        local output = sift.toon.encode(summary)
+        local output = sift.toon.encode(ctx, summary)
 
         -- Add failure details if any
         if summary.failed > 0 then
-            local failures = sift.jq.query(results, '[.[] | select(.outcome == "failed") | .name]')
+            local failures = sift.jq.query(ctx, results, '[.[] | select(.outcome == "failed") | .name]')
             output = output .. "\n" .. "FAILED: " .. failures
         end
 

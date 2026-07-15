@@ -1,37 +1,11 @@
-//! Command classification — parse input and determine command kind.
+//! Command classification — parse input and determine command structure.
 
 use brush_parser::ast::{Command as AstCommand, Program, SimpleCommand};
 use brush_parser::{parse_tokens, tokenize_str_with_options, ParserOptions};
 
-/// The kind of command being executed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CommandKind {
-    /// Simple file read: `cat <file>` with no flags.
-    SimpleFileRead {
-        /// Path to the file being read.
-        path: String,
-    },
-    /// File read with flags or in a pipeline.
-    FileRead,
-    /// Cargo test command.
-    CargoTest,
-    /// Cargo build or check command.
-    CargoBuild,
-    /// Git status command.
-    GitStatus,
-    /// Git diff command.
-    GitDiff,
-    /// Interactive builtin (cd, export, etc.).
-    Interactive,
-    /// Unknown or passthrough command.
-    Unknown,
-}
-
 /// Classification result with parsed information.
 #[derive(Debug, Clone)]
 pub struct Classification {
-    /// The kind of command.
-    pub kind: CommandKind,
     /// The command name (e.g., "cat", "git").
     pub name: String,
     /// Command arguments.
@@ -47,7 +21,6 @@ pub struct Classification {
 pub fn classify(input: &str) -> Classification {
     let Some(program) = parse_input(input) else {
         return Classification {
-            kind: CommandKind::Unknown,
             name: String::new(),
             args: Vec::new(),
             is_piped: false,
@@ -64,10 +37,7 @@ pub fn classify(input: &str) -> Classification {
     // Get the first simple command
     let (name, args, is_piped) = extract_first_command(&program);
 
-    let kind = classify_command(&name, &args, is_piped, is_compound);
-
     Classification {
-        kind,
         name,
         args,
         is_piped,
@@ -119,30 +89,7 @@ fn get_command_args(simple: &SimpleCommand) -> Vec<String> {
     args
 }
 
-/// Classify a command based on name and arguments.
-fn classify_command(name: &str, args: &[String], is_piped: bool, is_compound: bool) -> CommandKind {
-    match name {
-        "cat" if !is_piped && !is_compound && args.iter().all(|a| !a.starts_with('-')) && args.len() == 1 => {
-            CommandKind::SimpleFileRead {
-                path: args[0].clone(),
-            }
-        }
-        "cat" => CommandKind::FileRead,
-        "cargo" => match args.first().map(String::as_str) {
-            Some("test") => CommandKind::CargoTest,
-            Some("build" | "check") => CommandKind::CargoBuild,
-            _ => CommandKind::Unknown,
-        },
-        "git" => match args.first().map(String::as_str) {
-            Some("status") => CommandKind::GitStatus,
-            Some("diff") => CommandKind::GitDiff,
-            _ => CommandKind::Unknown,
-        },
-        "cd" | "export" | "unset" | "source" | "." | "exit" => CommandKind::Interactive,
-        _ => CommandKind::Unknown,
-    }
-}
-
+#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,52 +98,65 @@ mod tests {
     fn test_classify_simple_cat() {
         let result = classify("cat foo.rs");
         assert_eq!(result.name, "cat");
-        assert!(matches!(result.kind, CommandKind::SimpleFileRead { .. }));
+        assert_eq!(result.args, vec!["foo.rs"]);
+        assert!(!result.is_piped);
+        assert!(!result.is_compound);
     }
 
     #[test]
     fn test_classify_cat_with_flags() {
         let result = classify("cat -n foo.rs");
         assert_eq!(result.name, "cat");
-        assert_eq!(result.kind, CommandKind::FileRead);
+        assert_eq!(result.args, vec!["-n", "foo.rs"]);
     }
 
     #[test]
     fn test_classify_cat_piped() {
         let result = classify("cat foo.rs | grep bar");
         assert!(result.is_piped);
-        assert_eq!(result.kind, CommandKind::FileRead);
+        assert_eq!(result.name, "cat");
     }
 
     #[test]
     fn test_classify_cargo_test() {
         let result = classify("cargo test");
         assert_eq!(result.name, "cargo");
-        assert_eq!(result.kind, CommandKind::CargoTest);
+        assert_eq!(result.args, vec!["test"]);
     }
 
     #[test]
     fn test_classify_git_status() {
         let result = classify("git status");
         assert_eq!(result.name, "git");
-        assert_eq!(result.kind, CommandKind::GitStatus);
+        assert_eq!(result.args, vec!["status"]);
     }
 
     #[test]
     fn test_classify_cd() {
         let result = classify("cd /tmp");
-        assert_eq!(result.kind, CommandKind::Interactive);
+        assert_eq!(result.name, "cd");
+        assert_eq!(result.args, vec!["/tmp"]);
     }
 
     #[test]
     fn test_classify_unknown() {
         let result = classify("gcc main.c");
-        assert_eq!(result.kind, CommandKind::Unknown);
+        assert_eq!(result.name, "gcc");
+        assert_eq!(result.args, vec!["main.c"]);
     }
 
     #[test]
     fn test_classify_compound() {
         let result = classify("cd /x && cat foo.rs");
         assert!(result.is_compound);
+        assert_eq!(result.name, "cd");
+    }
+
+    #[test]
+    fn test_classify_empty() {
+        let result = classify("");
+        assert!(result.name.is_empty());
+        assert!(!result.is_piped);
+        assert!(!result.is_compound);
     }
 }

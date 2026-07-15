@@ -12,7 +12,7 @@ return {
             parts[#parts + 1] = args[i]
         end
         local cmd = table.concat(parts, " ")
-        local output, stderr, exit_code = sift.exec(cmd)
+        local output, stderr, exit_code = sift.exec(ctx, cmd)
         -- Combine stdout and stderr for output
         local combined = output .. stderr
         return {

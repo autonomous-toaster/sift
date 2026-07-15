@@ -1,14 +1,32 @@
 -- cat.lua — file read plugin (priority 0)
 -- Reads file via sift.fs.read(), caches by hash, returns "unchanged" on cache hit.
+-- Also handles piped stdin: caches by content hash, returns unchanged on repeat.
 return {
     name = "cat",
     priority = 0,
     pattern = "cat",
 
     execute = function(ctx, args, stdin)
-        -- Passthrough if stdin is piped
+        -- Handle piped stdin
         if stdin ~= nil then
-            return { status = "passthrough" }
+            local hash = sift.hash.sha256(ctx, stdin)
+            local cache_key = "stdin:" .. hash
+
+            if sift.cache.has(ctx, cache_key) then
+                return {
+                    status = "unchanged",
+                    fingerprint = cache_key,
+                    message = "[sift] piped content unchanged since last read"
+                }
+            end
+
+            sift.cache.set(ctx, cache_key)
+
+            return {
+                status = "handled",
+                output = stdin,
+                exit_code = 0
+            }
         end
 
         -- Passthrough if flags are present or wrong number of args

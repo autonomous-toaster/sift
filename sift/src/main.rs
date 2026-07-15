@@ -68,15 +68,18 @@ async fn main() -> Result<()> {
 /// Load all built-in Lua plugins.
 fn load_builtin_plugins(lua: &mut SiftLua) -> Result<()> {
     lua.load_plugin_from_str("bash", include_str!("../plugins/bash.lua"))?;
-    lua.load_plugin_from_str("cat", include_str!("../plugins/cat.lua"))?;
     lua.load_plugin_from_str("command", include_str!("../plugins/command.lua"))?;
-    lua.load_plugin_from_str("git_status", include_str!("../plugins/git_status.lua"))?;
     lua.load_plugin_from_str("reset", include_str!("../plugins/reset.lua"))?;
     Ok(())
 }
 
-/// Load user plugins from `~/.config/sift/plugins/*.lua` and `SIFT_PLUGINS`.
+/// Load user plugins from `plugins/`, `~/.config/sift/plugins/*.lua` and `SIFT_PLUGINS`.
 fn load_user_plugins(lua: &mut SiftLua) {
+    // Scan top-level plugins/ directory (shipped optional plugins)
+    let project_plugins = std::path::PathBuf::from("plugins");
+    if project_plugins.is_dir() {
+        load_plugins_from_dir(lua, &project_plugins);
+    }
     // Scan ~/.config/sift/plugins/
     if let Some(home) = dirs::home_dir() {
         let user_dir = home.join(".config").join("sift").join("plugins");
@@ -114,14 +117,7 @@ fn load_plugins_from_dir(lua: &mut SiftLua, dir: &PathBuf) {
 
 /// Agent mode: execute a command and output the result.
 fn agent_mode(lua: &SiftLua, cmd: &str) -> Result<()> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let (name, args) = if parts.is_empty() {
-        return Ok(());
-    } else {
-        (parts[0], parts[1..].iter().map(ToString::to_string).collect::<Vec<_>>())
-    };
-
-    let (output, exit_code, _plugin) = lua.dispatch(name, &args, None)?;
+    let (output, exit_code, _plugin) = lua.dispatch_full(cmd, None)?;
 
     if !output.is_empty() {
         io::stdout().write_all(output.as_bytes())?;
@@ -153,10 +149,7 @@ fn repl_mode(lua: &SiftLua) -> Result<()> {
             break;
         }
 
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let (name, args) = (parts[0], parts[1..].iter().map(ToString::to_string).collect::<Vec<_>>());
-
-        let (output, exit_code, _plugin) = lua.dispatch(name, &args, None)?;
+        let (output, exit_code, _plugin) = lua.dispatch_full(cmd, None)?;
 
         if !output.is_empty() {
             io::stdout().write_all(output.as_bytes())?;

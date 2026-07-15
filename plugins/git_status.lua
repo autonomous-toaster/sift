@@ -3,7 +3,7 @@
 return {
     name = "git_status",
     priority = 0,
-    pattern = "git",
+    pattern = "git status",
 
     execute = function(ctx, args, stdin)
         if args[1] ~= "status" then

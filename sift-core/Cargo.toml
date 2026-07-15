@@ -27,6 +27,7 @@ toon-format = { workspace = true }
 jaq-parse = { workspace = true }
 jaq-syn = { workspace = true }
 jaq-interpret = { workspace = true }
+regex-lite = "0.1"
 tokio = { workspace = true }
 
 [dev-dependencies]
