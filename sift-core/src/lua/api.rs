@@ -636,10 +636,15 @@ impl SiftLua {
 
         let final_output = if status == "unchanged" {
             // Emit auto-nudge for bypass hint
-            if let Ok(mut guard) = self.nudges.lock() {
-                guard.push(format!("use 'command cat {}' for unfiltered content", result.get::<String>("path").unwrap_or_default()));
+            let msg: String = result.get("message").unwrap_or_default();
+            // Extract filename from message like "[sift] Cargo.toml unchanged since last read"
+            let filename = msg.split_whitespace().nth(1).unwrap_or("").to_string();
+            if !filename.is_empty() {
+                if let Ok(mut guard) = self.nudges.lock() {
+                    guard.push(format!("cached: 'command cat {filename}'"));
+                }
             }
-            result.get::<String>("message").unwrap_or(output)
+            msg
         } else {
             output
         };
