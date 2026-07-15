@@ -17,6 +17,7 @@ impl SiftLua {
         self.register_env(&sift)?;
         self.register_classify(&sift)?;
         self.register_store(&sift)?;
+        self.register_nudge(&sift)?;
         self.register_meta(&sift)?;
         self.lua.globals().set("sift", sift)?;
         Ok(())
@@ -56,21 +57,36 @@ impl SiftLua {
 
     fn register_log(&self, sift: &Table) -> Result<()> {
         let log_table = self.lua.create_table()?;
-        let log_fn = self.lua.create_function(|_, (_ctx, level, msg): (Table, String, String)| {
-            match level.as_str() {
-                "error" => eprintln!("[sift] ERROR: {msg}"),
-                "warn" => eprintln!("[sift] WARN: {msg}"),
-                "info" => println!("[sift] INFO: {msg}"),
-                "debug" => println!("[sift] DEBUG: {msg}"),
-                _ => eprintln!("[sift] {level}: {msg}"),
-            }
+
+        let info_fn = self.lua.create_function(|_, (_ctx, msg): (Table, String)| {
+            println!("[sift] INFO: {msg}");
             Ok(())
         })?;
-        let log_metatable = self.lua.create_table()?;
-        log_metatable.set("__call", log_fn)?;
-        log_table.set_metatable(Some(log_metatable));
+        log_table.set("info", info_fn)?;
 
-        // sift.log.nudge(ctx, msg)
+        let warn_fn = self.lua.create_function(|_, (_ctx, msg): (Table, String)| {
+            eprintln!("[sift] WARN: {msg}");
+            Ok(())
+        })?;
+        log_table.set("warn", warn_fn)?;
+
+        let error_fn = self.lua.create_function(|_, (_ctx, msg): (Table, String)| {
+            eprintln!("[sift] ERROR: {msg}");
+            Ok(())
+        })?;
+        log_table.set("error", error_fn)?;
+
+        let debug_fn = self.lua.create_function(|_, (_ctx, msg): (Table, String)| {
+            println!("[sift] DEBUG: {msg}");
+            Ok(())
+        })?;
+        log_table.set("debug", debug_fn)?;
+
+        sift.set("log", log_table)?;
+        Ok(())
+    }
+
+    fn register_nudge(&self, sift: &Table) -> Result<()> {
         let nudges = self.nudges.clone();
         let nudge_fn = self.lua.create_function(move |_, (_ctx, msg): (Table, String)| {
             if let Ok(mut guard) = nudges.lock() {
@@ -78,8 +94,7 @@ impl SiftLua {
             }
             Ok(())
         })?;
-        log_table.set("nudge", nudge_fn)?;
-        sift.set("log", log_table)?;
+        sift.set("nudge", nudge_fn)?;
         Ok(())
     }
 
@@ -503,13 +518,15 @@ impl SiftLua {
             candidates.push(full.clone());
         }
 
+        // Pass 1: check specific patterns only (no wildcard)
         for candidate in candidates.iter().rev() {
             if let Some(entry) = self.plugins.iter().find(|e| e.patterns.iter().any(|p| p == candidate)) {
                 return Some(entry);
             }
         }
 
-        None
+        // Pass 2: fall back to wildcard plugin if no specific match
+        self.plugins.iter().find(|e| e.patterns.iter().any(|p| p == "*"))
     }
 
     /// Dispatch a full command string, handling cd/pushd/popd prefixes and pipelines.
@@ -635,16 +652,7 @@ impl SiftLua {
         }
 
         let final_output = if status == "unchanged" {
-            // Emit auto-nudge for bypass hint
-            let msg: String = result.get("message").unwrap_or_default();
-            // Extract filename from message like "[sift] Cargo.toml unchanged since last read"
-            let filename = msg.split_whitespace().nth(1).unwrap_or("").to_string();
-            if !filename.is_empty() {
-                if let Ok(mut guard) = self.nudges.lock() {
-                    guard.push(format!("bypass: 'command cat {filename}'"));
-                }
-            }
-            msg
+            self.handle_unchanged(&result)
         } else {
             output
         };
@@ -687,6 +695,18 @@ impl SiftLua {
             let _ = write!(text, "\n[sift] {n}");
         }
         text
+    }
+
+    /// Handle `status = "unchanged"` result: emit bypass nudge and return message.
+    fn handle_unchanged(&self, result: &Table) -> String {
+        let msg: String = result.get("message").unwrap_or_default();
+        let filename = msg.split_whitespace().nth(1).unwrap_or("").to_string();
+        if !filename.is_empty() {
+            if let Ok(mut guard) = self.nudges.lock() {
+                guard.push(format!("bypass: 'command cat {filename}'"));
+            }
+        }
+        msg
     }
 
     /// Execute a command directly (passthrough — bypass all plugins).

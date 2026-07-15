@@ -583,4 +583,24 @@ mod tests {
         assert_eq!(output, "");
         assert_eq!(exit_code, 0);
     }
+
+    #[test]
+    fn test_dispatch_unchanged_nudge() {
+        let mut lua = SiftLua::new(None, test_context()).unwrap();
+        let plugin_code = r#"
+            return {
+                name = "test-cmd",
+                priority = 0,
+                pattern = "test-cmd",
+                execute = function(ctx, args, stdin)
+                    return { status = "unchanged", message = "[sift] foo.rs unchanged since last read" }
+                end
+            }
+        "#;
+        lua.load_plugin_from_str("test", plugin_code).unwrap();
+        let (output, exit_code, _plugin) = lua.dispatch("test-cmd", &[], None).unwrap();
+        assert!(output.contains("[sift] foo.rs unchanged since last read"), "output: {output}");
+        assert!(output.contains("bypass: 'command cat foo.rs'"), "output: {output}");
+        assert_eq!(exit_code, 0);
+    }
 }
