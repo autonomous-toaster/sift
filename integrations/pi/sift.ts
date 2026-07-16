@@ -26,7 +26,7 @@ function siftEnv(sessionId?: string): NodeJS.ProcessEnv {
 }
 
 function siftExec(cmd: string): string {
-	return execSync(`sift -c ${shQuote(cmd)}`, {
+	return execSync(`sift -c ${JSON.stringify(cmd)}`, {
 		env: siftEnv(),
 		encoding: "utf-8",
 		maxBuffer: 10 * 1024 * 1024,
@@ -44,7 +44,7 @@ export default function (pi: ExtensionAPI) {
 	const readTool = createReadTool(cwd, {
 		operations: {
 			readFile: async (absolutePath: string) => {
-				const result = siftExec(`sift-read ${shQuote(absolutePath)}`);
+				const result = siftExec(`sift-read ${absolutePath}`);
 				return Buffer.from(result);
 			},
 			access: async (absolutePath: string) => {
