@@ -83,9 +83,24 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	pi.on("session_compact", resetCache);
-	pi.on("session_tree", resetCache);
-	pi.on("session_fork", resetCache);
-	pi.on("session_switch", resetCache);
-	pi.on("session_shutdown", resetCache);
+	pi.on("session_compact", (_event, ctx) => {
+		currentSessionId = ctx.sessionManager.getSessionId() ?? "default";
+		resetCache();
+	});
+	pi.on("session_tree", (_event, ctx) => {
+		currentSessionId = ctx.sessionManager.getSessionId() ?? "default";
+		resetCache();
+	});
+	pi.on("session_fork", (_event, ctx) => {
+		currentSessionId = ctx.sessionManager.getSessionId() ?? "default";
+		resetCache();
+	});
+	pi.on("session_switch", (_event, ctx) => {
+		currentSessionId = ctx.sessionManager.getSessionId() ?? "default";
+		resetCache();
+	});
+	pi.on("session_shutdown", (_event, ctx) => {
+		currentSessionId = ctx.sessionManager.getSessionId() ?? "default";
+		resetCache();
+	});
 }
