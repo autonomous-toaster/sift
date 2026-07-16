@@ -136,9 +136,15 @@ return {
             if cached then
                 sift.nudge(ctx, "bypass: 'sift-read --fresh " .. raw_path .. "'")
                 if offset or limit then
+                    local msg
+                    if range_start == range_end then
+                        msg = string.format("[sift] %s line %d unchanged", raw_path, range_start)
+                    else
+                        msg = string.format("[sift] %s lines %d-%d unchanged", raw_path, range_start, range_end)
+                    end
                     return {
                         status = "unchanged",
-                        message = string.format("[sift] %s lines %d-%d unchanged", raw_path, range_start, range_end)
+                        message = msg
                     }
                 end
                 return {
