@@ -33,12 +33,6 @@ const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
-	bypass_cache: Type.Optional(
-		Type.Boolean({
-			description:
-				"If true, bypass readcache optimization for this call and return baseline read output for the requested scope",
-		}),
-	),
 });
 
 export default function (pi: ExtensionAPI) {
@@ -47,28 +41,17 @@ export default function (pi: ExtensionAPI) {
 		name: "read",
 		label: "read",
 		description:
-			"Read the contents of a file. Supports text files and images (jpg, png, gif, webp). " +
+			"Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). " +
 			"Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB " +
 			"(whichever is hit first). Use offset/limit for large files. " +
-			"Returns full text, unchanged marker, or unified diff. " +
-			"Treat output as authoritative for requested scope. " +
-			"Set bypass_cache=true to force baseline output for this call only. " +
-			"If an edit fails because exact old text was not found, re-read the same path and scope " +
-			"with bypass_cache=true before retrying edit. " +
-			"Use readcache_refresh only when output is insufficient for correctness across calls; " +
-			"it invalidates trust for the selected scope until that scope is re-anchored by a baseline read, " +
-			"and increases repeated-read context usage.",
+			"When you need the full file, continue with offset until complete.",
 		parameters: readSchema,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const sessionId = ctx?.sessionManager?.getSessionId?.() ?? "default";
-			const { path, offset, limit, bypass_cache } = params;
+			const { path, offset, limit } = params;
 
-			let cmd = "sift-read";
-			if (bypass_cache) {
-				cmd += " --fresh";
-			}
-			cmd += " " + JSON.stringify(path);
+			let cmd = "sift-read " + JSON.stringify(path);
 			if (offset !== undefined) {
 				cmd += " " + offset;
 				if (limit !== undefined) {
