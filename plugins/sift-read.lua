@@ -155,8 +155,8 @@ return {
                 local old_content = sift.cache.load_file(ctx, old_hash)
                 if old_content then
                     local diff = sift.diff(ctx, old_content, content)
-                    -- Usefulness gate: only emit diff if < 90% of full content
-                    if #diff < #content * 0.9 then
+                    -- Usefulness gate: only emit diff if non-empty and < 90% of full content
+                    if #diff > 0 and #diff < #content * 0.9 then
                         if offset or limit then
                             sift.cache.store_content(ctx, hash, content)
                             sift.cache.add_range(ctx, hash, range_start, range_end)

@@ -132,5 +132,5 @@ check-file-sizes max="500" tolerance="10":
             echo "FAIL: $f has $lines lines (target $TARGET, hard limit $MAX)"
             fail=1
         fi
-    done < <(find src -name '*.rs' | grep -v '/tests/')
+    done < <(find sift/src sift-core/src -name '*.rs' | grep -v '/tests/')
     [ $fail -eq 0 ] && echo "✓ all source files within $MAX lines (target $TARGET + ${TOL}% tolerance)"

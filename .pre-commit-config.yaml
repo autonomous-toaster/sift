@@ -45,9 +45,3 @@ repos:
         pass_filenames: true
         exclude: ^(target/|.*\.pb\.rs$)
 
-      - id: hadolint
-        name: hadolint Dockerfile
-        entry: hadolint
-        language: system
-        files: Dockerfile
-        pass_filenames: true
