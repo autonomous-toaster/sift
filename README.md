@@ -80,7 +80,6 @@ return {
 |--------|----------|---------|-------------|
 | `command.lua` | 1000 | `"command"` | Bypass mechanism — `command cat foo` runs real `cat` |
 | `reset.lua` | 1000 | `"reset"` | Clear sift cache for current session |
-| `cat.lua` | 0 | `"cat"` | Caches file reads + piped stdin, returns "unchanged" on cache hit |
 | `bash.lua` | -1000 | `"__default__"` | Default fallback — runs command via bash |
 
 ### Shipped optional plugins (`plugins/`)

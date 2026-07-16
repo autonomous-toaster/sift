@@ -127,18 +127,25 @@ return {
         range_end = math.min(range_end, total_lines)
 
         -- Check file-based cache (persists across invocations)
-        if not fresh and sift.cache.has_file(ctx, hash) then
-            sift.nudge(ctx, "bypass: 'sift-read --fresh " .. raw_path .. "'")
-            if offset or limit then
+        -- Full hash satisfies any range; range keys satisfy themselves
+        if not fresh then
+            local cached = sift.cache.has_file(ctx, hash)
+            if not cached and (offset or limit) then
+                cached = sift.cache.has_range(ctx, hash, range_start, range_end)
+            end
+            if cached then
+                sift.nudge(ctx, "bypass: 'sift-read --fresh " .. raw_path .. "'")
+                if offset or limit then
+                    return {
+                        status = "unchanged",
+                        message = string.format("[sift] %s lines %d-%d unchanged", raw_path, range_start, range_end)
+                    }
+                end
                 return {
                     status = "unchanged",
-                    message = string.format("[sift] %s lines %d-%d unchanged", raw_path, range_start, range_end)
+                    message = "[sift] " .. raw_path .. " unchanged since last read"
                 }
             end
-            return {
-                status = "unchanged",
-                message = "[sift] " .. raw_path .. " unchanged since last read"
-            }
         end
 
         -- Cache miss: try to load old content and emit diff
@@ -150,7 +157,12 @@ return {
                     local diff = sift.diff(ctx, old_content, content)
                     -- Usefulness gate: only emit diff if < 90% of full content
                     if #diff < #content * 0.9 then
-                        sift.cache.store_file(ctx, hash, content)
+                        if offset or limit then
+                            sift.cache.store_content(ctx, hash, content)
+                            sift.cache.add_range(ctx, hash, range_start, range_end)
+                        else
+                            sift.cache.store_file(ctx, hash, content)
+                        end
                         sift.cache.set_path_hash(ctx, path, hash)
                         return {
                             status = "handled",
@@ -163,7 +175,14 @@ return {
         end
 
         -- Store new content and cache
-        sift.cache.store_file(ctx, hash, content)
+        if offset or limit then
+            -- Range read: store content without full hash marker
+            sift.cache.store_content(ctx, hash, content)
+            sift.cache.add_range(ctx, hash, range_start, range_end)
+        else
+            -- Full read: store content with full hash marker
+            sift.cache.store_file(ctx, hash, content)
+        end
         sift.cache.set_path_hash(ctx, path, hash)
 
         -- Return content (possibly sliced)

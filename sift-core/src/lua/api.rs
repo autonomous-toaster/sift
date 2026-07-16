@@ -168,8 +168,10 @@ impl SiftLua {
     fn register_cache_file_ops(&self, cache: &Table) -> Result<()> {
         self.register_cache_file_has(cache)?;
         self.register_cache_file_store(cache)?;
+        self.register_cache_file_store_content(cache)?;
         self.register_cache_file_load(cache)?;
         self.register_cache_path_hash(cache)?;
+        self.register_cache_range_ops(cache)?;
         self.register_cache_cleanup(cache)?;
         self.register_cache_clear_all(cache)?;
         Ok(())
@@ -180,7 +182,13 @@ impl SiftLua {
             let session_id: String = ctx.get("session_id")?;
             let marker_path = std::path::PathBuf::from("/tmp/sift")
                 .join(&session_id).join("cache").join(&hash);
-            Ok(marker_path.exists())
+            // Only return true if marker exists AND has "full": true
+            // (range-only markers from add_range should not satisfy has_file)
+            std::fs::read_to_string(&marker_path).map_or_else(|_| Ok(false), |s| {
+                serde_json::from_str::<serde_json::Value>(&s)
+                    .map(|meta| meta.get("full").and_then(serde_json::Value::as_bool).unwrap_or(false))
+                    .map_err(|e| mlua::Error::external(format!("has_file parse: {e}")))
+            })
         })?;
         cache.set("has_file", f)?;
         Ok(())
@@ -208,7 +216,8 @@ impl SiftLua {
                 .as_millis();
             let meta = serde_json::json!({
                 "created_at": now,
-                "size": content.len()
+                "size": content.len(),
+                "full": true
             });
             std::fs::write(&marker_path, meta.to_string())
                 .map_err(|e| mlua::Error::external(format!("store marker: {e}")))?;
@@ -216,6 +225,22 @@ impl SiftLua {
             Ok(())
         })?;
         cache.set("store_file", f)?;
+        Ok(())
+    }
+
+    fn register_cache_file_store_content(&self, cache: &Table) -> Result<()> {
+        let f = self.lua.create_function(|_, (ctx, hash, content): (Table, String, String)| {
+            let session_id: String = ctx.get("session_id")?;
+            let objects_dir = std::path::PathBuf::from("/tmp/sift")
+                .join(&session_id).join("objects");
+            std::fs::create_dir_all(&objects_dir)
+                .map_err(|e| mlua::Error::external(format!("store objects dir: {e}")))?;
+            let object_path = objects_dir.join(format!("sha256-{hash}.txt"));
+            std::fs::write(&object_path, &content)
+                .map_err(|e| mlua::Error::external(format!("store object: {e}")))?;
+            Ok(())
+        })?;
+        cache.set("store_content", f)?;
         Ok(())
     }
 
@@ -255,6 +280,99 @@ impl SiftLua {
             std::fs::read_to_string(&marker_path).map_or_else(|_| Ok(None), |h| Ok(Some(h.trim().to_string())))
         })?;
         cache.set("get_path_hash", f_get)?;
+        Ok(())
+    }
+
+    fn register_cache_range_ops(&self, cache: &Table) -> Result<()> {
+        // sift.cache.add_range(ctx, hash, start, end)
+        let f_add = self.lua.create_function(|_, (ctx, hash, start, end_): (Table, String, u64, u64)| {
+            let session_id: String = ctx.get("session_id")?;
+            let marker_path = std::path::PathBuf::from("/tmp/sift")
+                .join(&session_id).join("cache").join(&hash);
+
+            // Load existing marker or create default
+            let mut marker: serde_json::Value = std::fs::read_to_string(&marker_path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_else(|| serde_json::json!({"ranges": []}));
+
+            // Get or init ranges array
+            let mut ranges: Vec<[u64; 2]> = marker["ranges"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter().filter_map(|v| {
+                        let pair = v.as_array()?;
+                        let s = pair[0].as_u64()?;
+                        let e = pair[1].as_u64()?;
+                        Some([s, e])
+                    }).collect()
+                })
+                .unwrap_or_default();
+
+            // Add new range and merge
+            ranges.push([start, end_]);
+            ranges.sort_by_key(|r| r[0]);
+            let mut merged: Vec<[u64; 2]> = Vec::new();
+            for r in &ranges {
+                if let Some(last) = merged.last_mut() {
+                    if r[0] <= last[1] + 1 {
+                        last[1] = last[1].max(r[1]);
+                        continue;
+                    }
+                }
+                merged.push(*r);
+            }
+
+            // Update marker
+            let ranges_json: Vec<Vec<u64>> = merged.iter().map(|r| vec![r[0], r[1]]).collect();
+            marker["ranges"] = serde_json::json!(ranges_json);
+            if marker.get("created_at").is_none() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                marker["created_at"] = serde_json::json!(now);
+            }
+
+            if let Some(parent) = marker_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&marker_path, marker.to_string())
+                .map_err(|e| mlua::Error::external(format!("add range: {e}")))?;
+
+            Ok(())
+        })?;
+        cache.set("add_range", f_add)?;
+
+        // sift.cache.has_range(ctx, hash, start, end) -> bool
+        let f_has = self.lua.create_function(|_, (ctx, hash, start, end_): (Table, String, u64, u64)| {
+            let session_id: String = ctx.get("session_id")?;
+            let marker_path = std::path::PathBuf::from("/tmp/sift")
+                .join(&session_id).join("cache").join(&hash);
+
+            let Ok(marker_str) = std::fs::read_to_string(&marker_path) else { return Ok(false) };
+            let marker: serde_json::Value = match serde_json::from_str(&marker_str) {
+                Ok(v) => v,
+                Err(_) => return Ok(false),
+            };
+
+            let contained = marker["ranges"]
+                .as_array()
+                .is_some_and(|arr| {
+                    arr.iter().any(|v| {
+                        v.as_array()
+                            .and_then(|pair| {
+                                let s = pair[0].as_u64()?;
+                                let e = pair[1].as_u64()?;
+                                Some(s <= start && e >= end_)
+                            })
+                            .unwrap_or(false)
+                    })
+                });
+
+            Ok(contained)
+        })?;
+        cache.set("has_range", f_has)?;
         Ok(())
     }
 
