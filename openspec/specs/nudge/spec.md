@@ -6,7 +6,15 @@ Provide stronger, more actionable system prompt nudges to the agent when cached 
 
 ### Requirement: System prompt nudge in sift.ts
 
-The `before_agent_start` handler SHALL use stronger, more actionable instructions: tell the agent to say "same as before" and move on, tell the agent NOT to re-read or bypass unless file changed on disk, and remove vague "reuse it" language.
+The `before_agent_start` event handler SHALL append a short nudge to the system prompt on every turn. The nudge text SHALL be the same every turn so the system prompt hash stays stable (prompt caching not invalidated).
+
+Nudge text:
+
+```
+[sift] caches file reads. "[sift] ... unchanged" = content cached, reuse it. If you need fresh content, run sift's bypass command. Prefer sift over workarounds (cp, python3...) to save tokens.
+```
+
+Tell the agent to say "same as before" and move on, tell the agent NOT to re-read or bypass unless file changed on disk.
 
 ### Requirement: Unchanged message in all plugins
 
