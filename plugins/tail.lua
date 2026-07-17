@@ -1,28 +1,5 @@
 -- tail.lua — intercept tail -n <count> <path> (priority 0)
 -- Passthrough for -c (byte count) and other flags.
-local function split_lines(text)
-    local lines = {}
-    for line in text:gmatch("([^\n]*)\n?") do
-        table.insert(lines, line)
-    end
-    if text:sub(-1) == "\n" then
-        table.insert(lines, "")
-    end
-    return lines
-end
-
-local function slice_text(text, start_line, end_line)
-    local lines = split_lines(text)
-    local clamped_end = math.min(end_line, #lines)
-    if start_line > #lines then
-        return ""
-    end
-    local result = {}
-    for i = start_line, clamped_end do
-        table.insert(result, lines[i])
-    end
-    return table.concat(result, "\n")
-end
 
 -- Parse tail -n <count> <path> or -<count> <path>
 local function parse_tail(args)
@@ -73,7 +50,7 @@ return {
         end
 
         local hash = sift.hash.sha256(ctx, content)
-        local total_lines = #split_lines(content)
+        local total_lines = #sift.str.split_lines(content)
         local range_start = math.max(1, total_lines - parsed.count + 1)
         local range_end = total_lines
 
@@ -97,7 +74,7 @@ return {
         sift.cache.store_content(ctx, hash, content)
         sift.cache.add_range(ctx, hash, range_start, range_end)
 
-        local sliced = slice_text(content, range_start, range_end)
+        local sliced = sift.str.slice_text(content, range_start, range_end)
         return {
             status = "handled",
             output = sliced,

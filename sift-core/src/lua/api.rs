@@ -1,4 +1,5 @@
 use super::exec::{exec_command, find_real_bash};
+use super::stdin_reader::StdinReader;
 use super::{PluginEntry, SiftLua};
 use anyhow::{Context, Result};
 use mlua::{Function, Table, Value};
@@ -18,6 +19,7 @@ impl SiftLua {
         self.register_diff(&sift)?;
         self.register_store(&sift)?;
         self.register_nudge(&sift)?;
+        self.register_str(&sift)?;
         self.register_meta(&sift)?;
         self.lua.globals().set("sift", sift)?;
         Ok(())
@@ -102,7 +104,7 @@ impl SiftLua {
     pub fn dispatch_full(
         &self,
         full_cmd: &str,
-        stdin: Option<&str>,
+        stdin: Option<Value>,
     ) -> Result<(String, i32, String)> {
         // Handle cd <dir> && <command> — peel cd prefix, chdir, dispatch rest
         if let Some(rest) = peel_cd_prefix(full_cmd) {
@@ -125,50 +127,9 @@ impl SiftLua {
             return Ok((String::new(), 0, "cd".to_string()));
         }
 
-        // Pipeline optimization: check if command contains pipes
-        let trimmed = full_cmd.trim();
-        if trimmed.contains('|') && !trimmed.contains("||") {
-            // Split by | (not ||)
-            let segments: Vec<&str> = split_pipeline(trimmed);
-            if segments.len() > 1 {
-                let last_segment = segments.last().unwrap().trim();
-                let last_parts: Vec<String> = shlex::split(last_segment)
-                    .unwrap_or_else(|| last_segment.split_whitespace().map(String::from).collect());
-                if !last_parts.is_empty() {
-                    let last_name = &last_parts[0];
-                    let last_args: Vec<String> = last_parts[1..].to_vec();
-
-                    // Check if last command matches a plugin
-                    if self.find_plugin(last_name, &last_args).is_some() {
-                        // Run preceding segments in bash, pipe to plugin
-                        let preceding = segments[..segments.len() - 1].join(" | ");
-                        let bash_path = find_real_bash();
-                        let output = std::process::Command::new(&bash_path)
-                            .arg("-c")
-                            .arg(&preceding)
-                            .env("PAGER", "cat")
-                            .env("TERM", "dumb")
-                            .stdout(std::process::Stdio::piped())
-                            .stderr(std::process::Stdio::piped())
-                            .output()
-                            .map_err(|e| mlua::Error::external(format!("pipeline spawn: {e}")))?;
-                        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                        let exit_code = output.status.code().unwrap_or(1);
-
-                        if exit_code != 0 {
-                            return Ok((
-                                format!("{stdout}{stderr}"),
-                                exit_code,
-                                "pipeline".to_string(),
-                            ));
-                        }
-
-                        // Dispatch last segment to plugin with preceding stdout as stdin
-                        return self.dispatch(last_name, &last_args, Some(&stdout));
-                    }
-                }
-            }
+        // Try pipeline optimization
+        if let Some(result) = self.try_pipeline(full_cmd)? {
+            return Ok(result);
         }
 
         // Normal dispatch
@@ -180,15 +141,92 @@ impl SiftLua {
         let name = &parts[0];
         let args: Vec<String> = parts[1..].to_vec();
 
-        // Handle < file redirect — read file, pass as stdin
+        // Handle file redirects
+        self.dispatch_with_redirect(name, &args, stdin)
+    }
+
+    /// Try pipeline optimization, returning `Some(result)` if the last segment matches a plugin.
+    fn try_pipeline(&self, full_cmd: &str) -> Result<Option<(String, i32, String)>> {
+        let trimmed = full_cmd.trim();
+        if !trimmed.contains('|') || trimmed.contains("||") {
+            return Ok(None);
+        }
+
+        let segments: Vec<&str> = split_pipeline(trimmed);
+        if segments.len() <= 1 {
+            return Ok(None);
+        }
+
+        let last_segment = segments.last().unwrap().trim();
+        let last_parts: Vec<String> = shlex::split(last_segment)
+            .unwrap_or_else(|| last_segment.split_whitespace().map(String::from).collect());
+        if last_parts.is_empty() {
+            return Ok(None);
+        }
+
+        let last_name = &last_parts[0];
+        let last_args: Vec<String> = last_parts[1..].to_vec();
+
+        if self.find_plugin(last_name, &last_args).is_none() {
+            return Ok(None);
+        }
+
+        // Run preceding segments in bash, pipe to plugin
+        let preceding = segments[..segments.len() - 1].join(" | ");
+        let bash_path = find_real_bash();
+        let output = std::process::Command::new(&bash_path)
+            .arg("-c")
+            .arg(&preceding)
+            .env("PAGER", "cat")
+            .env("TERM", "dumb")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|e| mlua::Error::external(format!("pipeline spawn: {e}")))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(1);
+
+        if exit_code != 0 {
+            return Ok(Some((format!("{stdout}{stderr}"), exit_code, "pipeline".to_string())));
+        }
+
+        // Dispatch last segment to plugin with preceding stdout as stdin
+        let reader = StdinReader::from_string(stdout);
+        let ud = self.lua.create_userdata(reader)
+            .map_err(|e| mlua::Error::external(format!("create userdata: {e}")))?;
+        let result = self.dispatch(last_name, &last_args, Some(Value::UserData(ud)))?;
+        Ok(Some(result))
+    }
+
+    /// Dispatch with file redirect handling (`<`, `>`, `>>`).
+    fn dispatch_with_redirect(
+        &self,
+        name: &str,
+        args: &[String],
+        stdin: Option<Value>,
+    ) -> Result<(String, i32, String)> {
+        // Handle < file redirect — open file, create StdinReader, pass as stdin
         if let Some(pos) = args.iter().position(|a| a == "<") {
             if pos + 1 < args.len() {
                 let file_path = &args[pos + 1];
-                if let Ok(content) = std::fs::read_to_string(file_path) {
-                    let mut clean_args = args.clone();
-                    clean_args.remove(pos); // remove <
-                    clean_args.remove(pos); // remove file path
-                    return self.dispatch(name, &clean_args, Some(&content));
+                match std::fs::File::open(file_path) {
+                    Ok(file) => {
+                        let reader = StdinReader::from_file(file);
+                        let mut clean_args = args.to_vec();
+                        clean_args.remove(pos);
+                        clean_args.remove(pos);
+                        let ud = self.lua.create_userdata(reader)
+                            .map_err(|e| mlua::Error::external(format!("create userdata: {e}")))?;
+                        return self.dispatch(name, &clean_args, Some(Value::UserData(ud)));
+                    }
+                    Err(e) => {
+                        return Ok((
+                            format!("sift: cannot open '{file_path}': {e}"),
+                            1,
+                            String::new(),
+                        ));
+                    }
                 }
             }
         }
@@ -198,9 +236,9 @@ impl SiftLua {
             if pos + 1 < args.len() {
                 let file_path = &args[pos + 1];
                 let append = args[pos] == ">>";
-                let mut clean_args = args.clone();
-                clean_args.remove(pos); // remove > or >>
-                clean_args.remove(pos); // remove file path
+                let mut clean_args = args.to_vec();
+                clean_args.remove(pos);
+                clean_args.remove(pos);
                 let (output, exit_code, plugin) = self.dispatch(name, &clean_args, stdin)?;
                 if exit_code == 0 {
                     if append {
@@ -208,7 +246,7 @@ impl SiftLua {
                             .append(true)
                             .create(true)
                             .open(file_path)
-                            .and_then(|mut f| std::io::Write::write_all(&mut f, output.as_bytes()));
+                            .and_then(|mut f| f.write_all(output.as_bytes()));
                     } else {
                         let _ = std::fs::write(file_path, &output);
                     }
@@ -217,7 +255,7 @@ impl SiftLua {
             }
         }
 
-        self.dispatch(name, &args, stdin)
+        self.dispatch(name, args, stdin)
     }
 
     /// Dispatch a command to the best matching plugin.
@@ -227,7 +265,7 @@ impl SiftLua {
         &self,
         cmd: &str,
         args: &[String],
-        stdin: Option<&str>,
+        stdin: Option<Value>,
     ) -> Result<(String, i32, String)> {
         let entry = self.find_entry(cmd, args)?;
 
@@ -250,10 +288,7 @@ impl SiftLua {
             args_table.set(i + 1, arg.clone())?;
         }
 
-        let stdin_val = match stdin {
-            Some(s) => Value::String(self.lua.create_string(s)?),
-            None => Value::Nil,
-        };
+        let stdin_val = stdin.unwrap_or(Value::Nil);
 
         // Clear nudges from previous dispatch
         if let Ok(mut guard) = self.nudges.lock() {
@@ -278,7 +313,7 @@ impl SiftLua {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
-            let key = format!("{}:{}", cmd, msg);
+            let key = format!("{cmd}:{msg}");
             if let Ok(mut recent) = self.recent_unchanged.lock() {
                 // Prune entries older than 10 seconds
                 recent.retain(|(_, ts)| now.saturating_sub(*ts) < 10_000);
@@ -290,10 +325,9 @@ impl SiftLua {
                 // Count occurrences of this key in the window
                 let count = recent.iter().filter(|(k, _)| k == &key).count();
                 if count >= 3 {
-                    msg = format!(
-                        "{}\n[sift] (this will keep returning the same result until the file changes on disk)",
-                        msg
-                    );
+                        msg = format!(
+                            "{msg}\n[sift] (this will keep returning the same result until the file changes on disk)",
+                        );
                 }
             }
 

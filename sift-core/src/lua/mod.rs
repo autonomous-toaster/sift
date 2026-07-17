@@ -16,6 +16,7 @@ pub(crate) mod api;
 pub(crate) mod api_reg_cache;
 pub(crate) mod api_reg_io;
 pub mod exec;
+pub(crate) mod stdin_reader;
 pub use exec::cleanup_cache;
 
 /// The sift Lua runtime, holding the VM and registered API.
@@ -30,7 +31,7 @@ pub struct SiftLua {
     ctx: SiftContext,
     /// Nudge messages accumulated during plugin execution.
     nudges: Arc<Mutex<Vec<String>>>,
-    /// Recent unchanged responses for burst detection: (key, timestamp_ms).
+    /// Recent unchanged responses for burst detection: (key, `timestamp_ms`).
     recent_unchanged: Arc<Mutex<Vec<(String, u128)>>>,
 }
 
@@ -82,3 +83,5 @@ impl SiftLua {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_plugins;

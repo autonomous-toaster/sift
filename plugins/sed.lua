@@ -1,29 +1,6 @@
 -- sed.lua — intercept sed -n range reads (priority 0)
 -- Only intercepts: sed -n '<start>,<end>p' <path>
 -- Passthrough for substitutions, -i, patterns, and other operations.
-local function split_lines(text)
-    local lines = {}
-    for line in text:gmatch("([^\n]*)\n?") do
-        table.insert(lines, line)
-    end
-    if text:sub(-1) == "\n" then
-        table.insert(lines, "")
-    end
-    return lines
-end
-
-local function slice_text(text, start_line, end_line)
-    local lines = split_lines(text)
-    local clamped_end = math.min(end_line, #lines)
-    if start_line > #lines then
-        return ""
-    end
-    local result = {}
-    for i = start_line, clamped_end do
-        table.insert(result, lines[i])
-    end
-    return table.concat(result, "\n")
-end
 
 -- Parse sed -n '<start>,<end>p' <path>
 -- Returns { path, start, end } or nil if not a range read
@@ -90,7 +67,7 @@ return {
         end
 
         local hash = sift.hash.sha256(ctx, content)
-        local total_lines = #split_lines(content)
+        local total_lines = #sift.str.split_lines(content)
         local range_end = math.min(range.end_line, total_lines)
 
         -- Check cache
@@ -113,7 +90,7 @@ return {
         sift.cache.store_content(ctx, hash, content)
         sift.cache.add_range(ctx, hash, range.start, range_end)
 
-        local sliced = slice_text(content, range.start, range_end)
+        local sliced = sift.str.slice_text(content, range.start, range_end)
         return {
             status = "handled",
             output = sliced,

@@ -2,31 +2,6 @@
 -- Reads file via sift.fs.read(), caches by hash, returns "unchanged" on cache hit.
 -- Shares cache with sift-read.lua via file-based content store.
 -- Also handles piped stdin: caches by content hash, returns unchanged on repeat.
-local SENSITIVE_PATTERNS = {
-    "^%.env",
-    "%.pem$",
-    "%.key$",
-    "%.p12$",
-    "%.pfx$",
-    "%.crt$",
-    "%.cer$",
-    "%.der$",
-    "%.pk8$",
-    "id_rsa$",
-    "id_ed25519$",
-    "%.npmrc$",
-    "%.netrc$",
-}
-
-local function is_sensitive(path)
-    local lower = path:lower()
-    for _, pattern in ipairs(SENSITIVE_PATTERNS) do
-        if lower:match(pattern) then
-            return true
-        end
-    end
-    return false
-end
 
 return {
     name = "cat",
@@ -34,8 +9,11 @@ return {
     pattern = "cat",
 
     execute = function(ctx, args, stdin)
-        -- Handle piped stdin
+        -- Handle piped stdin (supports both string and StdinReader)
         if stdin ~= nil then
+            if type(stdin) == "userdata" then
+                stdin = tostring(stdin)
+            end
             local hash = sift.hash.sha256(ctx, stdin)
             local cache_key = "stdin:" .. hash
 
@@ -73,7 +51,7 @@ return {
         end
 
         -- Sensitive path bypass: don't cache
-        if is_sensitive(path) then
+        if sift.str.is_sensitive(path) then
             local content = sift.fs.read(ctx, path)
             if content == nil then
                 return nil, "cat: " .. args[1] .. ": No such file or directory"

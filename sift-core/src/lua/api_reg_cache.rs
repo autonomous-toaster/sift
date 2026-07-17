@@ -481,6 +481,16 @@ impl SiftLua {
     }
 
     pub(super) fn register_cache_clear_all(&self, cache: &Table) -> Result<()> {
+        // sift.cache.has_any(ctx) -> bool — check if cache has any entries
+        let f_has_any = self.lua.create_function(|_, ctx: Table| {
+            let session_id: String = ctx.get("session_id")?;
+            let cache_dir = std::path::PathBuf::from("/tmp/sift")
+                .join(&session_id)
+                .join("cache");
+            std::fs::read_dir(&cache_dir).map_or_else(|_| Ok(false), |entries| Ok(entries.flatten().next().is_some()))
+        })?;
+        cache.set("has_any", f_has_any)?;
+
         let f = self.lua.create_function(|_, ctx: Table| {
             let session_id: String = ctx.get("session_id")?;
             let base = std::path::PathBuf::from("/tmp/sift").join(&session_id);

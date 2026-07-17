@@ -241,7 +241,7 @@ fn test_sift_read_empty_diff_regression() {
         .dispatch(
             "test-read",
             &["test.txt".into(), "1".into(), "4".into()],
-            None,
+            None::<mlua::Value>,
         )
         .unwrap();
     assert_eq!(code, 0);
@@ -258,7 +258,7 @@ fn test_sift_read_empty_diff_regression() {
         .dispatch(
             "test-read",
             &["test.txt".into(), "1".into(), "5".into()],
-            None,
+            None::<mlua::Value>,
         )
         .unwrap();
     assert_eq!(code, 0);

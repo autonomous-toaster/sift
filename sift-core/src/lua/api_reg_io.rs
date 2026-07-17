@@ -376,6 +376,87 @@ impl SiftLua {
         Ok(())
     }
 
+    pub(super) fn register_str(&self, sift: &Table) -> Result<()> {
+        let str_tbl = self.lua.create_table()?;
+
+        // sift.str.split_lines(text) -> { line1, line2, ... }
+        let split_lines_fn = self
+            .lua
+            .create_function(|lua, text: String| {
+                let tbl = lua.create_table()?;
+                if text.is_empty() {
+                    tbl.set(1, String::new())?;
+                    return Ok(tbl);
+                }
+                let mut i = 1;
+                for line in text.lines() {
+                    tbl.set(i, line.to_string())?;
+                    i += 1;
+                }
+                if text.ends_with('\n') {
+                    tbl.set(i, String::new())?;
+                }
+                Ok(tbl)
+            })?;
+        str_tbl.set("split_lines", split_lines_fn)?;
+
+        // sift.str.slice_text(text, start, end) -> string
+        #[allow(clippy::cast_possible_truncation)]
+        let slice_text_fn = self
+            .lua
+            .create_function(|_, (text, start, end_): (String, u64, u64)| {
+                let lines: Vec<&str> = text.lines().collect();
+                let total = if text.ends_with('\n') {
+                    lines.len() + 1
+                } else {
+                    lines.len()
+                };
+                let s = (start.max(1) - 1) as usize;
+                let e = (end_.min(total as u64)) as usize;
+                if s >= total || s >= e {
+                    return Ok(String::new());
+                }
+                let selected: Vec<&str> = lines.iter().skip(s).take(e - s).copied().collect();
+                Ok(selected.join("\n"))
+            })?;
+        str_tbl.set("slice_text", slice_text_fn)?;
+
+        // sift.str.is_sensitive(path) -> bool
+        let sensitive_patterns: &[(&str, bool, bool)] = &[
+            (".env", true, false),
+            (".pem", false, true),
+            (".key", false, true),
+            (".p12", false, true),
+            (".pfx", false, true),
+            (".crt", false, true),
+            (".cer", false, true),
+            (".der", false, true),
+            (".pk8", false, true),
+            ("id_rsa", false, false),
+            ("id_ed25519", false, false),
+            (".npmrc", false, true),
+            (".netrc", false, true),
+        ];
+        let is_sensitive_fn = self
+            .lua
+            .create_function(move |_, path: String| {
+                let lower = path.to_lowercase();
+                Ok(sensitive_patterns.iter().any(|(pat, prefix, suffix)| {
+                    if *prefix {
+                        lower.starts_with(pat)
+                    } else if *suffix {
+                        lower.ends_with(pat)
+                    } else {
+                        lower.contains(pat)
+                    }
+                }))
+            })?;
+        str_tbl.set("is_sensitive", is_sensitive_fn)?;
+
+        sift.set("str", str_tbl)?;
+        Ok(())
+    }
+
     pub(super) fn register_store(&self, sift: &Table) -> Result<()> {
         let session_id = self.ctx.session_id.clone().unwrap_or_default();
         let cmd_count = self.ctx.cmd_count;

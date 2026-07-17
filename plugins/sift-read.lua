@@ -3,55 +3,6 @@
 --        sift-read --fresh <path> [<offset> [<limit>]]
 -- Shares cache with cat.lua via file-based content store.
 -- Returns "unchanged" on cache hit, unified diff on content change, or full content.
-local SENSITIVE_PATTERNS = {
-    "^%.env",
-    "%.pem$",
-    "%.key$",
-    "%.p12$",
-    "%.pfx$",
-    "%.crt$",
-    "%.cer$",
-    "%.der$",
-    "%.pk8$",
-    "id_rsa$",
-    "id_ed25519$",
-    "%.npmrc$",
-    "%.netrc$",
-}
-
-local function is_sensitive(path)
-    local lower = path:lower()
-    for _, pattern in ipairs(SENSITIVE_PATTERNS) do
-        if lower:match(pattern) then
-            return true
-        end
-    end
-    return false
-end
-
-local function split_lines(text)
-    local lines = {}
-    for line in text:gmatch("([^\n]*)\n?") do
-        table.insert(lines, line)
-    end
-    if text:sub(-1) == "\n" then
-        table.insert(lines, "")
-    end
-    return lines
-end
-
-local function slice_text(text, start_line, end_line)
-    local lines = split_lines(text)
-    local clamped_end = math.min(end_line, #lines)
-    if start_line > #lines then
-        return ""
-    end
-    local result = {}
-    for i = start_line, clamped_end do
-        table.insert(result, lines[i])
-    end
-    return table.concat(result, "\n")
-end
 
 return {
     name = "sift-read",
@@ -97,19 +48,19 @@ return {
         end
 
         -- Sensitive path bypass
-        if is_sensitive(path) then
+        if sift.str.is_sensitive(path) then
             local content = sift.fs.read(ctx, path)
             if content == nil then
                 return nil, "sift-read: " .. raw_path .. ": No such file or directory"
             end
             if offset and limit then
-                local lines = split_lines(content)
+                local lines = sift.str.split_lines(content)
                 local start = offset
                 local end_line = math.min(offset + limit - 1, #lines)
-                content = slice_text(content, start, end_line)
+                content = sift.str.slice_text(content, start, end_line)
             elseif offset then
-                local lines = split_lines(content)
-                content = slice_text(content, offset, #lines)
+                local lines = sift.str.split_lines(content)
+                content = sift.str.slice_text(content, offset, #lines)
             end
             return { status = "handled", output = content, exit_code = 0 }
         end
@@ -120,7 +71,7 @@ return {
             return nil, "sift-read: " .. raw_path .. ": No such file or directory"
         end
 
-        local total_lines = #split_lines(content)
+        local total_lines = #sift.str.split_lines(content)
         local hash = sift.hash.sha256(ctx, content)
 
         -- Compute range
@@ -206,7 +157,7 @@ return {
 
         -- Return content (possibly sliced)
         if offset or limit then
-            content = slice_text(content, range_start, range_end)
+            content = sift.str.slice_text(content, range_start, range_end)
         end
 
         return {

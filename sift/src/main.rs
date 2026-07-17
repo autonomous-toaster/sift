@@ -123,7 +123,7 @@ fn load_plugins_from_dir(lua: &mut SiftLua, dir: &PathBuf) {
 
 /// Agent mode: execute a command and output the result.
 fn agent_mode(lua: &SiftLua, cmd: &str) -> Result<()> {
-    let (_output, exit_code, _plugin) = lua.dispatch_full(cmd, None)?;
+    let (_output, exit_code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>)?;
 
     std::process::exit(exit_code);
 }
@@ -150,7 +150,7 @@ fn repl_mode(lua: &SiftLua) -> Result<()> {
             break;
         }
 
-        let (output, exit_code, _plugin) = lua.dispatch_full(cmd, None)?;
+        let (output, exit_code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>)?;
 
         if !output.is_empty() {
             io::stdout().write_all(output.as_bytes())?;

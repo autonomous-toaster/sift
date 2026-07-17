@@ -4,8 +4,8 @@
  * - Overrides the `read` tool to use `sift-read` (range-aware caching)
  * - Wraps every `bash` command with `sift -c "..."` (streaming, caching)
  * - Propagates AI_SESSION so cache persists across invocations
- * - Resets cache on compaction/fork/switch/shutdown
- * - Nudges the agent to understand sift cache markers
+ * - Resets cache on compaction only
+ * - Notifies user on cache reset success/failure
  *
  * Usage:
  *   pi -e ./integrations/pi/sift.ts
@@ -15,7 +15,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { execSync } from "child_process";
 import { readFileSync } from "fs";
-import { access as fsAccess } from "fs/promises";
 import { Type } from "typebox";
 
 function shQuote(s: string): string {
@@ -131,31 +130,21 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
-	// ── Reset cache on session events ───────────────────────────────
-	const resetCache = (sessionId: string) => {
+	// ── Reset cache on session_compact only ─────────────────────────
+	pi.on("session_compact", (_event, ctx) => {
+		const sessionId = ctx.sessionManager.getSessionId() ?? "default";
 		try {
-			execSync("sift -c reset", {
+			const result = execSync("sift -c reset", {
 				env: siftEnv(sessionId),
 				encoding: "utf-8",
-			});
-		} catch {
-			// Fail-open
+			}).toString().trim();
+			const msg = result.match(/\(.+\)/)?.[0];
+			ctx.ui.notify(msg ?? "cache reset", "info");
+		} catch (err) {
+			ctx.ui.notify(
+				err instanceof Error ? err.message : String(err),
+				"error",
+			);
 		}
-	};
-
-	pi.on("session_compact", (_event, ctx) => {
-		resetCache(ctx.sessionManager.getSessionId() ?? "default");
-	});
-	pi.on("session_tree", (_event, ctx) => {
-		resetCache(ctx.sessionManager.getSessionId() ?? "default");
-	});
-	pi.on("session_fork", (_event, ctx) => {
-		resetCache(ctx.sessionManager.getSessionId() ?? "default");
-	});
-	pi.on("session_switch", (_event, ctx) => {
-		resetCache(ctx.sessionManager.getSessionId() ?? "default");
-	});
-	pi.on("session_shutdown", (_event, ctx) => {
-		resetCache(ctx.sessionManager.getSessionId() ?? "default");
 	});
 }
