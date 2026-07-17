@@ -6,25 +6,25 @@ Provide a built-in rtk.lua plugin that delegates matching commands (docker, podm
 
 ## Requirements
 
-### Requirement: Rtk plugin delegates matching commands
+### Requirement: rtk uses wildcard pattern
 
-The system SHALL execute `rtk <original_command>` via `sift.exec()` for any command matching its pattern list.
+The rtk.lua plugin SHALL use pattern `"*"` (wildcard) instead of a hardcoded list of command names.
 
-#### Scenario: Docker ps delegated to rtk
+#### Scenario: Wildcard pattern set
 
-- **WHEN** a user runs `docker ps`
-- **THEN** the system SHALL execute `rtk docker ps` and return rtk's compact output.
+- **WHEN** rtk.lua is loaded
+- **THEN** its pattern SHALL be `"*"`
 
-### Requirement: Rtk plugin does not override specific plugins
+### Requirement: rtk falls through on failure
 
-The system SHALL NOT intercept commands that have a more specific plugin (longer pattern match). This is guaranteed by the dispatch system's longest-prefix matching, not by logic within rtk.lua.
+The rtk plugin SHALL attempt to execute `rtk <command>` via `sift.exec()`. On non-zero exit code, it SHALL return `{ status = "passthrough" }` to allow the next plugin to handle the command.
 
-#### Scenario: git status handled by git_status.lua, not rtk
+#### Scenario: rtk handles the command
 
-- **WHEN** a user runs `git status` and git_status.lua has pattern `"git status"` (length 10) while rtk has pattern `"git"` (length 3)
-- **THEN** the dispatch SHALL select git_status.lua (longer pattern wins).
+- **WHEN** `rtk docker ps` runs via `sift.exec()` and exit code is 0
+- **THEN** the plugin SHALL return rtk's output
 
-#### Scenario: git diff delegated to rtk
+#### Scenario: rtk does not handle the command
 
-- **WHEN** a user runs `git diff` and no plugin has pattern `"git diff"`
-- **THEN** the dispatch SHALL select rtk (pattern `"git"` matches the `"git"` candidate).
+- **WHEN** `rtk unknown-cmd` runs via `sift.exec()` and exit code is non-zero
+- **THEN** the plugin SHALL return `{ status = "passthrough" }`
