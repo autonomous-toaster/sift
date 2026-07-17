@@ -72,7 +72,10 @@ fn extract_first_command(program: &Program) -> (String, Vec<String>, bool) {
 
 /// Get the command name from a `SimpleCommand`.
 fn get_command_name(simple: &SimpleCommand) -> Option<&str> {
-    simple.word_or_name.as_ref().map(std::convert::AsRef::as_ref)
+    simple
+        .word_or_name
+        .as_ref()
+        .map(std::convert::AsRef::as_ref)
 }
 
 /// Get the arguments from a `SimpleCommand` (excluding the command name).

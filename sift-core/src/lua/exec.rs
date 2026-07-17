@@ -61,9 +61,13 @@ pub(crate) fn exec_command(
         .spawn()
         .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
 
-    let stdout_pipe = child.stdout.take()
+    let stdout_pipe = child
+        .stdout
+        .take()
         .ok_or_else(|| mlua::Error::external("no stdout pipe".to_string()))?;
-    let stderr_pipe = child.stderr.take()
+    let stderr_pipe = child
+        .stderr
+        .take()
         .ok_or_else(|| mlua::Error::external("no stderr pipe".to_string()))?;
 
     let stdout_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
@@ -120,7 +124,9 @@ pub(crate) fn exec_command(
         }
     });
 
-    let status = child.wait().map_err(|e| mlua::Error::external(format!("wait: {e}")))?;
+    let status = child
+        .wait()
+        .map_err(|e| mlua::Error::external(format!("wait: {e}")))?;
     let _ = stdout_handle.join();
     let _ = stderr_handle.join();
 
@@ -133,9 +139,16 @@ pub(crate) fn exec_command(
 
 /// Save raw output to a temp file and return the path.
 pub(crate) fn save_output(cmd: &str, session_id: &str, cmd_count: u64, output: &str) -> String {
-    let slug: String = cmd.chars()
+    let slug: String = cmd
+        .chars()
         .take(40)
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -183,7 +196,10 @@ pub fn cleanup_cache(session_id: &str, max_age_ms: u64) {
     if let Ok(entries) = std::fs::read_dir(&objects_dir) {
         for entry in entries.flatten() {
             let fname = entry.file_name().to_string_lossy().to_string();
-            if let Some(hash) = fname.strip_prefix("sha256-").and_then(|s| s.strip_suffix(".txt")) {
+            if let Some(hash) = fname
+                .strip_prefix("sha256-")
+                .and_then(|s| s.strip_suffix(".txt"))
+            {
                 if !active_hashes.contains(&hash.to_string()) {
                     let _ = std::fs::remove_file(entry.path());
                 }

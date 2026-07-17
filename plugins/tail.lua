@@ -79,17 +79,17 @@ return {
 
         -- Check cache
         if sift.cache.has_file(ctx, hash) then
-            sift.nudge(ctx, "bypass: 'command tail -n " .. parsed.count .. " " .. parsed.path .. "'")
+            local display_name = path:match("([^/]+)$") or parsed.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines %d-%d unchanged", parsed.path, range_start, range_end)
+                message = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command tail -n %d %s)", display_name, range_start, range_end, parsed.count, path)
             }
         end
         if sift.cache.has_range(ctx, hash, range_start, range_end) then
-            sift.nudge(ctx, "bypass: 'command tail -n " .. parsed.count .. " " .. parsed.path .. "'")
+            local display_name = path:match("([^/]+)$") or parsed.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines %d-%d unchanged", parsed.path, range_start, range_end)
+                message = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command tail -n %d %s)", display_name, range_start, range_end, parsed.count, path)
             }
         end
 

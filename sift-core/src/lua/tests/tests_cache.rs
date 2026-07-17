@@ -20,10 +20,13 @@ fn test_context() -> SiftContext {
 fn test_ctx(lua: &Lua) -> Table {
     let ctx = lua.create_table().unwrap();
     // Use unique session_id per test to avoid parallel test interference
-    let session_id = format!("test-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos());
+    let session_id = format!(
+        "test-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
     ctx.set("session_id", session_id).unwrap();
     ctx.set("cmd_count", 0).unwrap();
     ctx.set("cwd", "/tmp").unwrap();
@@ -63,8 +66,14 @@ fn test_cleanup_cache() {
 
     crate::lua::exec::cleanup_cache(session_id, 1);
 
-    assert!(!cache_dir.join("abc123").exists(), "expired cache entry should be deleted");
-    assert!(!objects_dir.join("sha256-orphan.txt").exists(), "orphan object should be deleted");
+    assert!(
+        !cache_dir.join("abc123").exists(),
+        "expired cache entry should be deleted"
+    );
+    assert!(
+        !objects_dir.join("sha256-orphan.txt").exists(),
+        "orphan object should be deleted"
+    );
 
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -89,8 +98,14 @@ fn test_cleanup_cache_preserves_fresh() {
 
     crate::lua::exec::cleanup_cache(session_id, 86_400_000);
 
-    assert!(cache_dir.join("abc123").exists(), "fresh cache entry should be preserved");
-    assert!(objects_dir.join("sha256-abc123.txt").exists(), "referenced object should be preserved");
+    assert!(
+        cache_dir.join("abc123").exists(),
+        "fresh cache entry should be preserved"
+    );
+    assert!(
+        objects_dir.join("sha256-abc123.txt").exists(),
+        "referenced object should be preserved"
+    );
 
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -105,14 +120,29 @@ fn test_range_cache_add_and_has() {
 
     cache_call_void(&cache, "add_range", (ctx.clone(), hash, 1u64, 4u64));
 
-    assert!(cache_call_bool(&cache, "has_range", (ctx.clone(), hash, 1u64, 4u64)), "[1,4] should be contained");
-    assert!(!cache_call_bool(&cache, "has_range", (ctx.clone(), hash, 1u64, 5u64)), "[1,5] should NOT be contained");
-    assert!(!cache_call_bool(&cache, "has_range", (ctx.clone(), hash, 3u64, 5u64)), "[3,5] should NOT be contained");
+    assert!(
+        cache_call_bool(&cache, "has_range", (ctx.clone(), hash, 1u64, 4u64)),
+        "[1,4] should be contained"
+    );
+    assert!(
+        !cache_call_bool(&cache, "has_range", (ctx.clone(), hash, 1u64, 5u64)),
+        "[1,5] should NOT be contained"
+    );
+    assert!(
+        !cache_call_bool(&cache, "has_range", (ctx.clone(), hash, 3u64, 5u64)),
+        "[3,5] should NOT be contained"
+    );
 
     cache_call_void(&cache, "add_range", (ctx.clone(), hash, 1u64, 5u64));
 
-    assert!(cache_call_bool(&cache, "has_range", (ctx.clone(), hash, 1u64, 5u64)), "[1,5] should be contained after merge");
-    assert!(cache_call_bool(&cache, "has_range", (ctx, hash, 3u64, 5u64)), "[3,5] should be contained by [1,5]");
+    assert!(
+        cache_call_bool(&cache, "has_range", (ctx.clone(), hash, 1u64, 5u64)),
+        "[1,5] should be contained after merge"
+    );
+    assert!(
+        cache_call_bool(&cache, "has_range", (ctx, hash, 3u64, 5u64)),
+        "[3,5] should be contained by [1,5]"
+    );
 }
 
 #[test]
@@ -126,7 +156,10 @@ fn test_range_cache_merge_adjacent() {
     cache_call_void(&cache, "add_range", (ctx.clone(), hash, 1u64, 3u64));
     cache_call_void(&cache, "add_range", (ctx.clone(), hash, 4u64, 6u64));
 
-    assert!(cache_call_bool(&cache, "has_range", (ctx, hash, 1u64, 6u64)), "[1,6] should be contained after merge");
+    assert!(
+        cache_call_bool(&cache, "has_range", (ctx, hash, 1u64, 6u64)),
+        "[1,6] should be contained after merge"
+    );
 }
 
 #[test]
@@ -139,8 +172,14 @@ fn test_range_cache_full_vs_range() {
 
     cache_call_void(&cache, "store_file", (ctx.clone(), hash, "test content"));
 
-    assert!(cache_call_bool(&cache, "has_file", (ctx.clone(), hash)), "has_file should return true for full read");
-    assert!(!cache_call_bool(&cache, "has_range", (ctx, hash, 5u64, 10u64)), "has_range should return false");
+    assert!(
+        cache_call_bool(&cache, "has_file", (ctx.clone(), hash)),
+        "has_file should return true for full read"
+    );
+    assert!(
+        !cache_call_bool(&cache, "has_range", (ctx, hash, 5u64, 10u64)),
+        "has_range should return false"
+    );
 }
 
 #[test]
@@ -198,14 +237,41 @@ fn test_sift_read_empty_diff_regression() {
     "#;
     lua.load_plugin_from_str("test-read", plugin).unwrap();
 
-    let (output, code, _) = lua.dispatch("test-read", &["test.txt".into(), "1".into(), "4".into()], None).unwrap();
+    let (output, code, _) = lua
+        .dispatch(
+            "test-read",
+            &["test.txt".into(), "1".into(), "4".into()],
+            None,
+        )
+        .unwrap();
     assert_eq!(code, 0);
-    assert!(output.contains("line1"), "first read should return content, got: {output}");
-    assert!(output.contains("line4"), "first read should include line4, got: {output}");
+    assert!(
+        output.contains("line1"),
+        "first read should return content, got: {output}"
+    );
+    assert!(
+        output.contains("line4"),
+        "first read should include line4, got: {output}"
+    );
 
-    let (output, code, _) = lua.dispatch("test-read", &["test.txt".into(), "1".into(), "5".into()], None).unwrap();
+    let (output, code, _) = lua
+        .dispatch(
+            "test-read",
+            &["test.txt".into(), "1".into(), "5".into()],
+            None,
+        )
+        .unwrap();
     assert_eq!(code, 0);
-    assert!(output.contains("line1"), "second read should return content, got: {output}");
-    assert!(output.contains("line5"), "second read should include line5, got: {output}");
-    assert!(!output.is_empty(), "output should NOT be empty (regression: empty diff bug)");
+    assert!(
+        output.contains("line1"),
+        "second read should return content, got: {output}"
+    );
+    assert!(
+        output.contains("line5"),
+        "second read should include line5, got: {output}"
+    );
+    assert!(
+        !output.is_empty(),
+        "output should NOT be empty (regression: empty diff bug)"
+    );
 }

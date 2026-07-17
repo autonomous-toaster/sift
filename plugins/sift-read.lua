@@ -75,6 +75,8 @@ return {
         if #args >= arg_idx then
             path = args[arg_idx]
             raw_path = args[arg_idx]
+            -- Strip surrounding quotes
+            path = path:match("^['\"](.*)['\"]$") or path
             arg_idx = arg_idx + 1
         else
             return { status = "passthrough" }
@@ -134,13 +136,13 @@ return {
                 cached = sift.cache.has_range(ctx, hash, range_start, range_end)
             end
             if cached then
-                sift.nudge(ctx, "bypass: 'sift-read --fresh " .. raw_path .. "'")
+                local display_name = path:match("([^/]+)$") or path
                 if offset or limit then
                     local msg
                     if range_start == range_end then
-                        msg = string.format("[sift] %s line %d unchanged", raw_path, range_start)
+                        msg = string.format("[sift] %s line %d unchanged (cached)\n      (bypass if stale: sift-read --fresh %s %d)", display_name, range_start, path, range_start)
                     else
-                        msg = string.format("[sift] %s lines %d-%d unchanged", raw_path, range_start, range_end)
+                        msg = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: sift-read --fresh %s %d %d)", display_name, range_start, range_end, path, range_start, range_end - range_start + 1)
                     end
                     return {
                         status = "unchanged",
@@ -149,7 +151,7 @@ return {
                 end
                 return {
                     status = "unchanged",
-                    message = "[sift] " .. raw_path .. " unchanged since last read"
+                    message = "[sift] " .. display_name .. " unchanged (cached)\n      (bypass if stale: sift-read --fresh " .. path .. ")"
                 }
             end
         end
@@ -163,6 +165,17 @@ return {
                     local diff = sift.diff(ctx, old_content, content)
                     -- Usefulness gate: only emit diff if non-empty and < 90% of full content
                     if #diff > 0 and #diff < #content * 0.9 then
+                        -- Count changed lines for header
+                        local changed = 0
+                        for line in diff:gmatch("[^\n]+") do
+                            local first = line:sub(1, 1)
+                            if first == "+" or first == "-" then
+                                if line:sub(1, 3) ~= "---" and line:sub(1, 3) ~= "+++" then
+                                    changed = changed + 1
+                                end
+                            end
+                        end
+                        local header = string.format("[sift: %d lines changed of %d]\n", changed, total_lines)
                         if offset or limit then
                             sift.cache.store_content(ctx, hash, content)
                             sift.cache.add_range(ctx, hash, range_start, range_end)
@@ -172,7 +185,7 @@ return {
                         sift.cache.set_path_hash(ctx, path, hash)
                         return {
                             status = "handled",
-                            output = diff,
+                            output = header .. diff,
                             exit_code = 0
                         }
                     end

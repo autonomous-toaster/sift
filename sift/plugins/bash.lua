@@ -13,11 +13,8 @@ return {
         end
         local cmd = table.concat(parts, " ")
         local output, stderr, exit_code = sift.exec(ctx, cmd)
-        -- Combine stdout and stderr for output
-        local combined = output .. stderr
         return {
             status = "handled",
-            output = combined,
             exit_code = exit_code
         }
     end

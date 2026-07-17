@@ -182,14 +182,16 @@ impl SessionStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|(path, hash, mtime, size, last_read, read_count)| FileCacheEntry {
-            path,
-            hash,
-            mtime,
-            size,
-            last_read,
-            read_count,
-        }))
+        Ok(row.map(
+            |(path, hash, mtime, size, last_read, read_count)| FileCacheEntry {
+                path,
+                hash,
+                mtime,
+                size,
+                last_read,
+                read_count,
+            },
+        ))
     }
 
     /// Upsert a file cache entry.
@@ -221,7 +223,24 @@ impl SessionStore {
         item_type: &str,
         item_id: &str,
     ) -> Result<Option<ConversationEntry>> {
-        let row = sqlx::query_as::<_, (String, String, Option<i32>, i64, i64, i64, i32, i32, Option<i64>, Option<i64>, Option<i64>, Option<String>, Option<String>)>(
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<i32>,
+                i64,
+                i64,
+                i64,
+                i32,
+                i32,
+                Option<i64>,
+                Option<i64>,
+                Option<i64>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
             "SELECT item_type, item_id, estimated_tokens, commands_since_at_create,
                     first_shown, last_shown, shown_count, re_requested,
                     raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format
@@ -234,7 +253,21 @@ impl SessionStore {
         .await?;
 
         Ok(row.map(
-            |(item_type, item_id, estimated_tokens, commands_since_at_create, first_shown, last_shown, shown_count, re_requested, raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format)| {
+            |(
+                item_type,
+                item_id,
+                estimated_tokens,
+                commands_since_at_create,
+                first_shown,
+                last_shown,
+                shown_count,
+                re_requested,
+                raw_bytes,
+                filtered_bytes,
+                reduction_bps,
+                plugin_name,
+                output_format,
+            )| {
                 ConversationEntry {
                     item_type,
                     item_id,
@@ -321,8 +354,12 @@ impl SessionStore {
 
     /// Clear all cache entries for a session.
     pub async fn clear_session(&self) -> Result<()> {
-        sqlx::query("DELETE FROM conversation_cache").execute(&self.pool).await?;
-        sqlx::query("DELETE FROM file_cache").execute(&self.pool).await?;
+        sqlx::query("DELETE FROM conversation_cache")
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM file_cache")
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -419,7 +456,16 @@ mod tests {
         let store = SessionStore::open(&db_path).await.unwrap();
 
         store
-            .record_conversation("file_content", "test:id", Some(100), 0, None, None, None, None)
+            .record_conversation(
+                "file_content",
+                "test:id",
+                Some(100),
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -437,7 +483,16 @@ mod tests {
         let store = SessionStore::open(&db_path).await.unwrap();
 
         store
-            .record_conversation("file_content", "test:id", Some(100), 0, None, None, None, None)
+            .record_conversation(
+                "file_content",
+                "test:id",
+                Some(100),
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         store
@@ -459,7 +514,16 @@ mod tests {
         let store = SessionStore::open(&db_path).await.unwrap();
 
         store
-            .record_conversation("file_content", "test:id", Some(100), 0, None, None, None, None)
+            .record_conversation(
+                "file_content",
+                "test:id",
+                Some(100),
+                0,
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         store.clear_session().await.unwrap();

@@ -91,21 +91,20 @@ return {
 
         -- Check file-based cache first (shared with sift-read)
         if sift.cache.has_file(ctx, hash) then
-            sift.nudge(ctx, "bypass: 'command cat " .. args[1] .. "'")
+            local display_name = path:match("([^/]+)$") or args[1]
             return {
                 status = "unchanged",
-                message = "[sift] " .. args[1] .. " unchanged since last read"
+                message = "[sift] " .. display_name .. " unchanged (cached)\n      (bypass if stale: command cat " .. path .. ")"
             }
         end
 
         -- Also check in-memory cache (for piped stdin compatibility)
         local cache_key = path .. ":" .. hash
         if sift.cache.has(ctx, cache_key) then
-            sift.nudge(ctx, "bypass: 'command cat " .. args[1] .. "'")
             return {
                 status = "unchanged",
                 fingerprint = cache_key,
-                message = "[sift] " .. args[1] .. " unchanged since last read"
+                message = "[sift] piped content unchanged (cached)"
             }
         end
 

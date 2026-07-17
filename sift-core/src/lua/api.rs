@@ -32,13 +32,16 @@ impl SiftLua {
     /// - `execute`: function(ctx, args, stdin) -> result table
     pub fn load_plugin_from_str(&mut self, name: &str, lua_code: &str) -> Result<()> {
         let chunk = self.lua.load(lua_code).set_name(name);
-        let plugin_table: Table = chunk.eval().with_context(|| format!("failed to load plugin {name}"))?;
+        let plugin_table: Table = chunk
+            .eval()
+            .with_context(|| format!("failed to load plugin {name}"))?;
 
         let plugin_name: String = plugin_table.get("name")?;
         let priority: i32 = plugin_table.get("priority").unwrap_or(0);
 
         // Support pattern as string or string[]
-        let patterns: Vec<String> = plugin_table.get::<String>("pattern")
+        let patterns: Vec<String> = plugin_table
+            .get::<String>("pattern")
             .map(|s| vec![s])
             .or_else(|_| plugin_table.get::<Vec<String>>("pattern"))
             .unwrap_or_else(|_| vec![plugin_name]);
@@ -56,8 +59,7 @@ impl SiftLua {
         self.plugins.sort_by(|a, b| {
             let a_max = a.patterns.iter().map(String::len).max().unwrap_or(0);
             let b_max = b.patterns.iter().map(String::len).max().unwrap_or(0);
-            b_max.cmp(&a_max)
-                .then_with(|| b.priority.cmp(&a.priority))
+            b_max.cmp(&a_max).then_with(|| b.priority.cmp(&a.priority))
         });
 
         Ok(())
@@ -75,13 +77,19 @@ impl SiftLua {
 
         // Pass 1: check specific patterns only (no wildcard)
         for candidate in candidates.iter().rev() {
-            if let Some(entry) = self.plugins.iter().find(|e| e.patterns.iter().any(|p| p == candidate)) {
+            if let Some(entry) = self
+                .plugins
+                .iter()
+                .find(|e| e.patterns.iter().any(|p| p == candidate))
+            {
                 return Some(entry);
             }
         }
 
         // Pass 2: fall back to wildcard plugin if no specific match
-        self.plugins.iter().find(|e| e.patterns.iter().any(|p| p == "*"))
+        self.plugins
+            .iter()
+            .find(|e| e.patterns.iter().any(|p| p == "*"))
     }
 
     /// Dispatch a full command string, handling cd/pushd/popd prefixes and pipelines.
@@ -91,7 +99,11 @@ impl SiftLua {
     /// # Panics
     ///
     /// Panics if the Lua dispatch encounters an unexpected error.
-    pub fn dispatch_full(&self, full_cmd: &str, stdin: Option<&str>) -> Result<(String, i32, String)> {
+    pub fn dispatch_full(
+        &self,
+        full_cmd: &str,
+        stdin: Option<&str>,
+    ) -> Result<(String, i32, String)> {
         // Handle cd <dir> && <command> — peel cd prefix, chdir, dispatch rest
         if let Some(rest) = peel_cd_prefix(full_cmd) {
             return self.dispatch_full(&rest, stdin);
@@ -120,10 +132,11 @@ impl SiftLua {
             let segments: Vec<&str> = split_pipeline(trimmed);
             if segments.len() > 1 {
                 let last_segment = segments.last().unwrap().trim();
-                let last_parts: Vec<&str> = last_segment.split_whitespace().collect();
+                let last_parts: Vec<String> = shlex::split(last_segment)
+                    .unwrap_or_else(|| last_segment.split_whitespace().map(String::from).collect());
                 if !last_parts.is_empty() {
-                    let last_name = last_parts[0];
-                    let last_args: Vec<String> = last_parts[1..].iter().map(ToString::to_string).collect();
+                    let last_name = &last_parts[0];
+                    let last_args: Vec<String> = last_parts[1..].to_vec();
 
                     // Check if last command matches a plugin
                     if self.find_plugin(last_name, &last_args).is_some() {
@@ -144,7 +157,11 @@ impl SiftLua {
                         let exit_code = output.status.code().unwrap_or(1);
 
                         if exit_code != 0 {
-                            return Ok((format!("{stdout}{stderr}"), exit_code, "pipeline".to_string()));
+                            return Ok((
+                                format!("{stdout}{stderr}"),
+                                exit_code,
+                                "pipeline".to_string(),
+                            ));
                         }
 
                         // Dispatch last segment to plugin with preceding stdout as stdin
@@ -155,19 +172,63 @@ impl SiftLua {
         }
 
         // Normal dispatch
-        let parts: Vec<&str> = full_cmd.split_whitespace().collect();
+        let parts = shlex::split(full_cmd)
+            .unwrap_or_else(|| full_cmd.split_whitespace().map(String::from).collect());
         if parts.is_empty() {
             return Ok((String::new(), 0, String::new()));
         }
-        let name = parts[0];
-        let args: Vec<String> = parts[1..].iter().map(ToString::to_string).collect();
+        let name = &parts[0];
+        let args: Vec<String> = parts[1..].to_vec();
+
+        // Handle < file redirect — read file, pass as stdin
+        if let Some(pos) = args.iter().position(|a| a == "<") {
+            if pos + 1 < args.len() {
+                let file_path = &args[pos + 1];
+                if let Ok(content) = std::fs::read_to_string(file_path) {
+                    let mut clean_args = args.clone();
+                    clean_args.remove(pos); // remove <
+                    clean_args.remove(pos); // remove file path
+                    return self.dispatch(name, &clean_args, Some(&content));
+                }
+            }
+        }
+
+        // Handle > file and >> file redirect — capture output, write to file
+        if let Some(pos) = args.iter().position(|a| a == ">" || a == ">>") {
+            if pos + 1 < args.len() {
+                let file_path = &args[pos + 1];
+                let append = args[pos] == ">>";
+                let mut clean_args = args.clone();
+                clean_args.remove(pos); // remove > or >>
+                clean_args.remove(pos); // remove file path
+                let (output, exit_code, plugin) = self.dispatch(name, &clean_args, stdin)?;
+                if exit_code == 0 {
+                    if append {
+                        let _ = std::fs::OpenOptions::new()
+                            .append(true)
+                            .create(true)
+                            .open(file_path)
+                            .and_then(|mut f| std::io::Write::write_all(&mut f, output.as_bytes()));
+                    } else {
+                        let _ = std::fs::write(file_path, &output);
+                    }
+                }
+                return Ok((output, exit_code, plugin));
+            }
+        }
+
         self.dispatch(name, &args, stdin)
     }
 
     /// Dispatch a command to the best matching plugin.
     ///
     /// Returns `(output, exit_code, plugin_name)`.
-    pub fn dispatch(&self, cmd: &str, args: &[String], stdin: Option<&str>) -> Result<(String, i32, String)> {
+    pub fn dispatch(
+        &self,
+        cmd: &str,
+        args: &[String],
+        stdin: Option<&str>,
+    ) -> Result<(String, i32, String)> {
         let entry = self.find_entry(cmd, args)?;
 
         let plugin_table: Table = self.lua.registry_value(&entry.table)?;
@@ -177,7 +238,10 @@ impl SiftLua {
         let ctx = self.lua.create_table()?;
         ctx.set("cwd", self.ctx.cwd.display().to_string())?;
         ctx.set("cmd_count", self.ctx.cmd_count)?;
-        ctx.set("session_id", self.ctx.session_id.clone().unwrap_or_default())?;
+        ctx.set(
+            "session_id",
+            self.ctx.session_id.clone().unwrap_or_default(),
+        )?;
         ctx.set("command", cmd)?;
 
         // Build args table (arguments only, no command name)
@@ -207,7 +271,32 @@ impl SiftLua {
         }
 
         let final_output = if status == "unchanged" {
-            let msg = Self::handle_unchanged(&result);
+            let mut msg = Self::handle_unchanged(&result);
+
+            // Burst detection: track recent unchanged responses
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let key = format!("{}:{}", cmd, msg);
+            if let Ok(mut recent) = self.recent_unchanged.lock() {
+                // Prune entries older than 10 seconds
+                recent.retain(|(_, ts)| now.saturating_sub(*ts) < 10_000);
+                recent.push((key.clone(), now));
+                // Keep sliding window of last 10
+                while recent.len() > 10 {
+                    recent.remove(0);
+                }
+                // Count occurrences of this key in the window
+                let count = recent.iter().filter(|(k, _)| k == &key).count();
+                if count >= 3 {
+                    msg = format!(
+                        "{}\n[sift] (this will keep returning the same result until the file changes on disk)",
+                        msg
+                    );
+                }
+            }
+
             // Write unchanged message directly to stdout (for real-time visibility)
             print!("{msg}");
             let _ = std::io::stdout().flush();
@@ -233,7 +322,11 @@ impl SiftLua {
             format!("{final_output}{nudge_text}")
         };
 
-        Ok((final_output, exit_code, entry.patterns.first().cloned().unwrap_or_default()))
+        Ok((
+            final_output,
+            exit_code,
+            entry.patterns.first().cloned().unwrap_or_default(),
+        ))
     }
 
     /// Find the best matching plugin entry, falling back to __default__.
@@ -376,7 +469,16 @@ fn compact_value(
             if arr.len() > max_array_items {
                 let mut items: Vec<serde_json::Value> = arr[..max_array_items]
                     .iter()
-                    .map(|v| compact_value(v, max_string_len, max_array_items, max_depth, max_keys, depth + 1))
+                    .map(|v| {
+                        compact_value(
+                            v,
+                            max_string_len,
+                            max_array_items,
+                            max_depth,
+                            max_keys,
+                            depth + 1,
+                        )
+                    })
                     .collect();
                 let remaining = arr.len() - max_array_items;
                 items.push(serde_json::Value::String(format!("... +{remaining} more")));
@@ -384,7 +486,16 @@ fn compact_value(
             } else {
                 serde_json::Value::Array(
                     arr.iter()
-                        .map(|v| compact_value(v, max_string_len, max_array_items, max_depth, max_keys, depth + 1))
+                        .map(|v| {
+                            compact_value(
+                                v,
+                                max_string_len,
+                                max_array_items,
+                                max_depth,
+                                max_keys,
+                                depth + 1,
+                            )
+                        })
                         .collect(),
                 )
             }
@@ -394,7 +505,17 @@ fn compact_value(
                 .iter()
                 .take(max_keys)
                 .map(|(k, v)| {
-                    (k.clone(), compact_value(v, max_string_len, max_array_items, max_depth, max_keys, depth + 1))
+                    (
+                        k.clone(),
+                        compact_value(
+                            v,
+                            max_string_len,
+                            max_array_items,
+                            max_depth,
+                            max_keys,
+                            depth + 1,
+                        ),
+                    )
                 })
                 .collect();
             let mut map = serde_json::Map::new();

@@ -41,7 +41,10 @@ fn test_sift_hash_sha256() {
     let hash: Table = sift.get("hash").unwrap();
     let sha256: mlua::Function = hash.get("sha256").unwrap();
     let result: String = sha256.call((test_ctx(&lua.lua), "hello")).unwrap();
-    assert_eq!(result, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+    assert_eq!(
+        result,
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
 }
 
 #[test]
@@ -49,7 +52,9 @@ fn test_sift_token_count() {
     let lua = SiftLua::new(None, test_context()).unwrap();
     let sift: Table = lua.lua.globals().get("sift").unwrap();
     let token_count: mlua::Function = sift.get("token_count").unwrap();
-    let result: isize = token_count.call((test_ctx(&lua.lua), "hello world")).unwrap();
+    let result: isize = token_count
+        .call((test_ctx(&lua.lua), "hello world"))
+        .unwrap();
     assert_eq!(result, 2);
 }
 
@@ -67,7 +72,9 @@ fn test_plugin_load_and_dispatch() {
         }
     "#;
     lua.load_plugin_from_str("test", plugin_code).unwrap();
-    let (output, exit_code, plugin) = lua.dispatch("test-cmd", &["arg1".to_string()], None).unwrap();
+    let (output, exit_code, plugin) = lua
+        .dispatch("test-cmd", &["arg1".to_string()], None)
+        .unwrap();
     assert_eq!(output, "test: arg1");
     assert_eq!(exit_code, 0);
     assert_eq!(plugin, "test-cmd");
@@ -111,7 +118,13 @@ fn test_sift_fs_read() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.txt");
     std::fs::write(&path, "hello world").unwrap();
-    let content: String = fs_read.call((test_ctx(&lua.lua), path.display().to_string(), mlua::Value::Nil)).unwrap();
+    let content: String = fs_read
+        .call((
+            test_ctx(&lua.lua),
+            path.display().to_string(),
+            mlua::Value::Nil,
+        ))
+        .unwrap();
     assert_eq!(content, "hello world");
 }
 
@@ -142,8 +155,12 @@ fn test_sift_fs_write_and_read() {
     let fs_read: mlua::Function = fs.get("read").unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.txt").display().to_string();
-    fs_write.call::<()>((test_ctx(&lua.lua), path.clone(), "hello world")).unwrap();
-    let content: String = fs_read.call((test_ctx(&lua.lua), path, mlua::Value::Nil)).unwrap();
+    fs_write
+        .call::<()>((test_ctx(&lua.lua), path.clone(), "hello world"))
+        .unwrap();
+    let content: String = fs_read
+        .call((test_ctx(&lua.lua), path, mlua::Value::Nil))
+        .unwrap();
     assert_eq!(content, "hello world");
 }
 
@@ -156,7 +173,9 @@ fn test_sift_fs_stat() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.txt");
     std::fs::write(&path, "hello").unwrap();
-    let result: Table = fs_stat.call((test_ctx(&lua.lua), path.display().to_string())).unwrap();
+    let result: Table = fs_stat
+        .call((test_ctx(&lua.lua), path.display().to_string()))
+        .unwrap();
     let is_file: bool = result.get("is_file").unwrap();
     assert!(is_file);
 }
@@ -170,8 +189,15 @@ fn test_sift_fs_exists() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.txt");
     std::fs::write(&path, "hello").unwrap();
-    assert!(fs_exists.call::<bool>((test_ctx(&lua.lua), path.display().to_string())).unwrap());
-    assert!(!fs_exists.call::<bool>((test_ctx(&lua.lua), dir.path().join("nonexistent").display().to_string())).unwrap());
+    assert!(fs_exists
+        .call::<bool>((test_ctx(&lua.lua), path.display().to_string()))
+        .unwrap());
+    assert!(!fs_exists
+        .call::<bool>((
+            test_ctx(&lua.lua),
+            dir.path().join("nonexistent").display().to_string()
+        ))
+        .unwrap());
 }
 
 #[test]
@@ -202,7 +228,9 @@ fn test_sift_json_shortest_non_json() {
     let formats = lua.lua.create_table().unwrap();
     formats.set("toon", true).unwrap();
 
-    let result: String = shortest.call((test_ctx(&lua.lua), "not json", formats)).unwrap();
+    let result: String = shortest
+        .call((test_ctx(&lua.lua), "not json", formats))
+        .unwrap();
     assert_eq!(result, "not json");
 }
 
@@ -256,10 +284,19 @@ fn test_sift_json_shortest_large_json_toon_wins() {
     let large_str = serde_json::to_string(&large).unwrap();
     assert!(large_str.len() > 2000, "large JSON should be >2000 chars");
 
-    let result: String = shortest.call((test_ctx(&lua.lua), large_str, formats)).unwrap();
-    assert!(!result.is_empty(), "shortest should return non-empty output");
+    let result: String = shortest
+        .call((test_ctx(&lua.lua), large_str, formats))
+        .unwrap();
+    assert!(
+        !result.is_empty(),
+        "shortest should return non-empty output"
+    );
     let is_toon = result.contains(':') && result.contains("  ");
-    assert!(is_toon, "large JSON should produce TOON output, got: {}", &result[..200.min(result.len())]);
+    assert!(
+        is_toon,
+        "large JSON should produce TOON output, got: {}",
+        &result[..200.min(result.len())]
+    );
 }
 
 #[test]
@@ -281,7 +318,9 @@ fn test_sift_env() {
     let env: Table = sift.get("env").unwrap();
     let env_set: mlua::Function = env.get("set").unwrap();
     let env_get: mlua::Function = env.get("get").unwrap();
-    env_set.call::<()>((test_ctx(&lua.lua), "SIFT_TEST", "val")).unwrap();
+    env_set
+        .call::<()>((test_ctx(&lua.lua), "SIFT_TEST", "val"))
+        .unwrap();
     let result: Option<String> = env_get.call((test_ctx(&lua.lua), "SIFT_TEST")).unwrap();
     assert_eq!(result, Some("val".to_string()));
 }
@@ -308,7 +347,10 @@ fn test_sift_meta() {
 #[test]
 fn test_exec_command() {
     let (stdout, stderr, code) = exec_command("echo hello", "test", 0, None).unwrap();
-    assert!(stdout.contains("hello"), "stdout should contain hello, got: {stdout}");
+    assert!(
+        stdout.contains("hello"),
+        "stdout should contain hello, got: {stdout}"
+    );
     assert!(stderr.is_empty(), "stderr should be empty, got: {stderr}");
     assert_eq!(code, 0);
 }
@@ -316,8 +358,14 @@ fn test_exec_command() {
 #[test]
 fn test_exec_command_with_stderr() {
     let (stdout, stderr, code) = exec_command("echo out && echo err >&2", "test", 0, None).unwrap();
-    assert!(stdout.contains("out"), "stdout should contain out, got: {stdout}");
-    assert!(stderr.contains("err"), "stderr should contain err, got: {stderr}");
+    assert!(
+        stdout.contains("out"),
+        "stdout should contain out, got: {stdout}"
+    );
+    assert!(
+        stderr.contains("err"),
+        "stderr should contain err, got: {stderr}"
+    );
     assert_eq!(code, 0);
 }
 
@@ -448,8 +496,14 @@ fn test_dispatch_unchanged_nudge() {
     "#;
     lua.load_plugin_from_str("test", plugin_code).unwrap();
     let (output, exit_code, _plugin) = lua.dispatch("test-cmd", &[], None).unwrap();
-    assert!(output.contains("[sift] foo.rs unchanged since last read"), "output: {output}");
-    assert!(output.contains("bypass: 'command cat foo.rs'"), "output: {output}");
+    assert!(
+        output.contains("[sift] foo.rs unchanged since last read"),
+        "output: {output}"
+    );
+    assert!(
+        output.contains("bypass: 'command cat foo.rs'"),
+        "output: {output}"
+    );
     assert_eq!(exit_code, 0);
 }
 mod tests_cache;

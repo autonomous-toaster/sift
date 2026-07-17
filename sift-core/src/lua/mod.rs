@@ -30,6 +30,8 @@ pub struct SiftLua {
     ctx: SiftContext,
     /// Nudge messages accumulated during plugin execution.
     nudges: Arc<Mutex<Vec<String>>>,
+    /// Recent unchanged responses for burst detection: (key, timestamp_ms).
+    recent_unchanged: Arc<Mutex<Vec<(String, u128)>>>,
 }
 
 /// Context passed to plugin execution.
@@ -70,6 +72,7 @@ impl SiftLua {
             store,
             ctx,
             nudges: Arc::new(Mutex::new(Vec::new())),
+            recent_unchanged: Arc::new(Mutex::new(Vec::new())),
         };
 
         runtime.register_sift_table()?;

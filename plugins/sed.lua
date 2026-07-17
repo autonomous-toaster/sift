@@ -95,17 +95,17 @@ return {
 
         -- Check cache
         if sift.cache.has_file(ctx, hash) then
-            sift.nudge(ctx, "bypass: 'command sed -n '" .. range.start .. "," .. range_end .. "p' " .. range.path .. "'")
+            local display_name = path:match("([^/]+)$") or range.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines %d-%d unchanged", range.path, range.start, range_end)
+                message = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command sed -n '%d,%dp' %s)", display_name, range.start, range_end, range.start, range_end, path)
             }
         end
         if sift.cache.has_range(ctx, hash, range.start, range_end) then
-            sift.nudge(ctx, "bypass: 'command sed -n '" .. range.start .. "," .. range_end .. "p' " .. range.path .. "'")
+            local display_name = path:match("([^/]+)$") or range.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines %d-%d unchanged", range.path, range.start, range_end)
+                message = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command sed -n '%d,%dp' %s)", display_name, range.start, range_end, range.start, range_end, path)
             }
         end
 
