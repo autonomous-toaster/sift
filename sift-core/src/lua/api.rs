@@ -67,34 +67,49 @@ impl SiftLua {
             b_max.cmp(&a_max).then_with(|| b.priority.cmp(&a.priority))
         });
 
+        // Rebuild pattern map after sorting so indices are correct
+        self.pattern_map.clear();
+        for (i, entry) in self.plugins.iter().enumerate() {
+            for p in &entry.patterns {
+                // Only insert if this plugin has higher priority than existing match
+                let should_insert = self.pattern_map.get(p).map_or(true, |&existing_idx| {
+                    let existing = &self.plugins[existing_idx];
+                    let new_len = p.len();
+                    let existing_max = existing.patterns.iter().map(String::len).max().unwrap_or(0);
+                    entry.priority > existing.priority
+                        || (entry.priority == existing.priority && new_len > existing_max)
+                });
+                if should_insert {
+                    self.pattern_map.insert(p.clone(), i);
+                }
+            }
+        }
+
         Ok(())
     }
 
     /// Find the best matching plugin for a command.
     fn find_plugin(&self, cmd: &str, args: &[String]) -> Option<&PluginEntry> {
-        let mut candidates = vec![cmd.to_string()];
-        let mut full = cmd.to_string();
+        // Check exact cmd match first
+        if let Some(&idx) = self.pattern_map.get(cmd) {
+            return Some(&self.plugins[idx]);
+        }
+
+        // Check cmd + args combinations (longest first)
+        let mut full = String::with_capacity(
+            cmd.len() + args.iter().map(String::len).sum::<usize>() + args.len(),
+        );
+        full.push_str(cmd);
         for arg in args {
             full.push(' ');
             full.push_str(arg);
-            candidates.push(full.clone());
-        }
-
-        // Pass 1: check specific patterns only (no wildcard)
-        for candidate in candidates.iter().rev() {
-            if let Some(entry) = self
-                .plugins
-                .iter()
-                .find(|e| e.patterns.iter().any(|p| p == candidate))
-            {
-                return Some(entry);
+            if let Some(&idx) = self.pattern_map.get(&full) {
+                return Some(&self.plugins[idx]);
             }
         }
 
-        // Pass 2: fall back to wildcard plugin if no specific match
-        self.plugins
-            .iter()
-            .find(|e| e.patterns.iter().any(|p| p == "*"))
+        // Fall back to wildcard plugin
+        self.pattern_map.get("*").map(|&idx| &self.plugins[idx])
     }
 
     /// Dispatch a full command string, handling cd/pushd/popd prefixes and pipelines.
@@ -435,6 +450,7 @@ impl SiftLua {
     }
 
     /// Record a command execution into the `conversation_cache`.
+    /// Spawns a background thread to avoid blocking dispatch.
     fn record_conversation(
         &self,
         _cmd: &str,
@@ -446,41 +462,34 @@ impl SiftLua {
         let Some(store) = self.store.clone() else {
             return;
         };
-        let session_id = self.ctx.session_id.clone().unwrap_or_default();
-        if session_id.is_empty() {
-            return;
-        }
+        let session_id = match self.ctx.session_id.as_ref() {
+            Some(sid) if !sid.is_empty() => sid.clone(),
+            _ => return,
+        };
         let item_id = format!("{session_id}_{}", self.ctx.cmd_count);
         let cmd_count = i64::try_from(self.ctx.cmd_count).unwrap_or(i64::MAX);
-        let fut = async move {
-            let _ = store
-                .record_conversation(
-                    "command_output",
-                    &item_id,
-                    None,
-                    cmd_count,
-                    raw_bytes,
-                    filtered_bytes,
-                    plugin_name,
-                    output_format,
-                )
-                .await;
-        };
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                tokio::task::block_in_place(move || {
-                    handle.block_on(fut);
-                });
-            }
-            Err(_) => {
-                std::thread::spawn(move || {
-                    let Ok(rt) = tokio::runtime::Runtime::new() else {
-                        return;
-                    };
-                    rt.block_on(fut);
-                });
-            }
-        }
+        std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                let _ = store
+                    .record_conversation(
+                        "command_output",
+                        &item_id,
+                        None,
+                        cmd_count,
+                        raw_bytes,
+                        filtered_bytes,
+                        plugin_name,
+                        output_format,
+                    )
+                    .await;
+            });
+        });
     }
 
     /// Collect accumulated nudges into a formatted string, clearing the buffer.

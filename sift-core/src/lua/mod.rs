@@ -29,6 +29,8 @@ pub struct SiftLua {
     lua: Lua,
     /// Registered plugins: `(pattern, priority, plugin_table)`.
     plugins: Vec<PluginEntry>,
+    /// Pattern → plugin index lookup for O(1) matching.
+    pattern_map: HashMap<String, usize>,
     /// Session store for cache operations.
     store: Option<Arc<SessionStore>>,
     /// Current session context.
@@ -74,6 +76,7 @@ impl SiftLua {
         let runtime = Self {
             lua,
             plugins: Vec::new(),
+            pattern_map: HashMap::new(),
             store,
             ctx,
             nudges: Arc::new(Mutex::new(Vec::new())),
