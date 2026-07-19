@@ -316,10 +316,7 @@ impl SiftLua {
         let ctx = self.lua.create_table()?;
         ctx.set("cwd", self.ctx.cwd_str.as_str())?;
         ctx.set("cmd_count", self.ctx.cmd_count)?;
-        ctx.set(
-            "session_id",
-            self.ctx.session_id.clone().unwrap_or_default(),
-        )?;
+        ctx.set("session_id", self.session_id_str.as_str())?;
         ctx.set("command", cmd)?;
         ctx.set("merge_stderr", merge_stderr)?;
 
@@ -462,11 +459,10 @@ impl SiftLua {
         let Some(store) = self.store.clone() else {
             return;
         };
-        let session_id = match self.ctx.session_id.as_ref() {
-            Some(sid) if !sid.is_empty() => sid.clone(),
-            _ => return,
-        };
-        let item_id = format!("{session_id}_{}", self.ctx.cmd_count);
+        if self.session_id_str.is_empty() {
+            return;
+        }
+        let item_id = format!("{}_{}", self.session_id_str, self.ctx.cmd_count);
         let cmd_count = i64::try_from(self.ctx.cmd_count).unwrap_or(i64::MAX);
         std::thread::spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread()
