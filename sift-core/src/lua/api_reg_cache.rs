@@ -14,26 +14,41 @@ impl SiftLua {
         let lua = self.lua.clone();
         let exec_fn = self.lua.create_function(
             move |_, (_ctx, cmd, opts): (Table, String, Option<Table>)| {
-                // Extract optional transform function from opts
+                // Extract optional transform function and silent flag from opts
                 let transform: Option<TransformFn> = opts
                     .as_ref()
                     .and_then(|t| t.get::<mlua::Function>("transform").ok())
-                    .map(|func| {
+                    .and_then(|func| {
                         let lua_clone = lua.clone();
-                        let key = lua
-                            .create_registry_value(func)
-                            .expect("failed to store transform in registry");
-                        Box::new(move |chunk: &str| -> String {
+                        let Ok(key) = lua.create_registry_value(func) else {
+                            return None;
+                        };
+                        let b: TransformFn = Box::new(move |chunk: &str| -> String {
                             lua_clone
                                 .registry_value::<mlua::Function>(&key)
                                 .ok()
                                 .and_then(|f| f.call::<String>(chunk).ok())
                                 .unwrap_or_else(|| chunk.to_string())
-                        }) as TransformFn
+                        });
+                        Some(b)
                     });
+                let silent = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<bool>("silent").ok())
+                    .unwrap_or(false);
+                let merge_stderr = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<bool>("merge_stderr").ok())
+                    .unwrap_or(false);
 
-                let (stdout, stderr, exit_code) =
-                    exec_command(&cmd, &session_id, cmd_count, transform)?;
+                let (stdout, stderr, exit_code) = exec_command(
+                    &cmd,
+                    &session_id,
+                    cmd_count,
+                    transform,
+                    silent,
+                    merge_stderr,
+                )?;
                 let combined = format!("{stdout}{stderr}");
                 // On-error save with auto-nudge
                 if exit_code != 0 {
@@ -487,7 +502,10 @@ impl SiftLua {
             let cache_dir = std::path::PathBuf::from("/tmp/sift")
                 .join(&session_id)
                 .join("cache");
-            std::fs::read_dir(&cache_dir).map_or_else(|_| Ok(false), |entries| Ok(entries.flatten().next().is_some()))
+            std::fs::read_dir(&cache_dir).map_or_else(
+                |_| Ok(false),
+                |entries| Ok(entries.flatten().next().is_some()),
+            )
         })?;
         cache.set("has_any", f_has_any)?;
 

@@ -20,6 +20,7 @@ impl SiftLua {
         self.register_store(&sift)?;
         self.register_nudge(&sift)?;
         self.register_str(&sift)?;
+        self.register_gain(&sift)?;
         self.register_meta(&sift)?;
         self.lua.globals().set("sift", sift)?;
         Ok(())
@@ -157,7 +158,10 @@ impl SiftLua {
             return Ok(None);
         }
 
-        let last_segment = segments.last().unwrap().trim();
+        let last_segment = match segments.last() {
+            Some(s) => s.trim(),
+            None => return Ok(None),
+        };
         let last_parts: Vec<String> = shlex::split(last_segment)
             .unwrap_or_else(|| last_segment.split_whitespace().map(String::from).collect());
         if last_parts.is_empty() {
@@ -188,14 +192,20 @@ impl SiftLua {
         let exit_code = output.status.code().unwrap_or(1);
 
         if exit_code != 0 {
-            return Ok(Some((format!("{stdout}{stderr}"), exit_code, "pipeline".to_string())));
+            return Ok(Some((
+                format!("{stdout}{stderr}"),
+                exit_code,
+                "pipeline".to_string(),
+            )));
         }
 
         // Dispatch last segment to plugin with preceding stdout as stdin
         let reader = StdinReader::from_string(stdout);
-        let ud = self.lua.create_userdata(reader)
+        let ud = self
+            .lua
+            .create_userdata(reader)
             .map_err(|e| mlua::Error::external(format!("create userdata: {e}")))?;
-        let result = self.dispatch(last_name, &last_args, Some(Value::UserData(ud)))?;
+        let result = self.dispatch(last_name, &last_args, Some(Value::UserData(ud)), false)?;
         Ok(Some(result))
     }
 
@@ -206,6 +216,10 @@ impl SiftLua {
         args: &[String],
         stdin: Option<Value>,
     ) -> Result<(String, i32, String)> {
+        // Handle fd redirects (2>&1, 1>&2, etc.) — strip from args, set merge_stderr
+        let (clean_args, merge_stderr) = parse_fd_redirects(args);
+        let args = &clean_args;
+
         // Handle < file redirect — open file, create StdinReader, pass as stdin
         if let Some(pos) = args.iter().position(|a| a == "<") {
             if pos + 1 < args.len() {
@@ -213,12 +227,19 @@ impl SiftLua {
                 match std::fs::File::open(file_path) {
                     Ok(file) => {
                         let reader = StdinReader::from_file(file);
-                        let mut clean_args = args.to_vec();
+                        let mut clean_args = args.clone();
                         clean_args.remove(pos);
                         clean_args.remove(pos);
-                        let ud = self.lua.create_userdata(reader)
+                        let ud = self
+                            .lua
+                            .create_userdata(reader)
                             .map_err(|e| mlua::Error::external(format!("create userdata: {e}")))?;
-                        return self.dispatch(name, &clean_args, Some(Value::UserData(ud)));
+                        return self.dispatch(
+                            name,
+                            &clean_args,
+                            Some(Value::UserData(ud)),
+                            merge_stderr,
+                        );
                     }
                     Err(e) => {
                         return Ok((
@@ -236,10 +257,11 @@ impl SiftLua {
             if pos + 1 < args.len() {
                 let file_path = &args[pos + 1];
                 let append = args[pos] == ">>";
-                let mut clean_args = args.to_vec();
+                let mut clean_args = args.clone();
                 clean_args.remove(pos);
                 clean_args.remove(pos);
-                let (output, exit_code, plugin) = self.dispatch(name, &clean_args, stdin)?;
+                let (output, exit_code, plugin) =
+                    self.dispatch(name, &clean_args, stdin, merge_stderr)?;
                 if exit_code == 0 {
                     if append {
                         let _ = std::fs::OpenOptions::new()
@@ -255,7 +277,7 @@ impl SiftLua {
             }
         }
 
-        self.dispatch(name, args, stdin)
+        self.dispatch(name, args, stdin, merge_stderr)
     }
 
     /// Dispatch a command to the best matching plugin.
@@ -266,6 +288,7 @@ impl SiftLua {
         cmd: &str,
         args: &[String],
         stdin: Option<Value>,
+        merge_stderr: bool,
     ) -> Result<(String, i32, String)> {
         let entry = self.find_entry(cmd, args)?;
 
@@ -281,6 +304,7 @@ impl SiftLua {
             self.ctx.session_id.clone().unwrap_or_default(),
         )?;
         ctx.set("command", cmd)?;
+        ctx.set("merge_stderr", merge_stderr)?;
 
         // Build args table (arguments only, no command name)
         let args_table = self.lua.create_table()?;
@@ -302,7 +326,21 @@ impl SiftLua {
         let exit_code: i32 = result.get("exit_code").unwrap_or(0);
 
         if status == "passthrough" {
-            return Self::execute_passthrough(cmd, args);
+            let (passthrough_output, passthrough_exit_code, _) =
+                Self::execute_passthrough(cmd, args)?;
+            let raw = i64::try_from(passthrough_output.len()).unwrap_or(i64::MAX);
+            self.record_conversation(
+                cmd,
+                Some(raw),
+                Some(raw),
+                Some("command".to_string()),
+                Some("passthrough".to_string()),
+            );
+            return Ok((
+                passthrough_output,
+                passthrough_exit_code,
+                "command".to_string(),
+            ));
         }
 
         let final_output = if status == "unchanged" {
@@ -325,7 +363,7 @@ impl SiftLua {
                 // Count occurrences of this key in the window
                 let count = recent.iter().filter(|(k, _)| k == &key).count();
                 if count >= 3 {
-                        msg = format!(
+                    msg = format!(
                             "{msg}\n[sift] (this will keep returning the same result until the file changes on disk)",
                         );
                 }
@@ -336,8 +374,9 @@ impl SiftLua {
             let _ = std::io::stdout().flush();
             msg
         } else {
-            // Write handled output directly to stdout
-            if !output.is_empty() {
+            // Write handled output directly to stdout (unless already streamed by plugin)
+            let streamed: bool = result.get::<bool>("streamed").unwrap_or(false);
+            if !streamed && !output.is_empty() {
                 print!("{output}");
                 let _ = std::io::stdout().flush();
             }
@@ -355,6 +394,23 @@ impl SiftLua {
         } else {
             format!("{final_output}{nudge_text}")
         };
+
+        // Extract raw_bytes from plugin result (optional)
+        let raw_bytes: Option<i64> = result.get::<Option<i64>>("raw_bytes").unwrap_or_default();
+        let filtered_bytes = i64::try_from(final_output.len()).unwrap_or(i64::MAX);
+        let plugin_name = entry.patterns.first().cloned();
+        let output_format = if status == "unchanged" {
+            Some("unchanged".to_string())
+        } else {
+            Some("text".to_string())
+        };
+        self.record_conversation(
+            cmd,
+            raw_bytes.or(Some(filtered_bytes)),
+            Some(filtered_bytes),
+            plugin_name,
+            output_format,
+        );
 
         Ok((
             final_output,
@@ -374,6 +430,55 @@ impl SiftLua {
             },
             Ok,
         )
+    }
+
+    /// Record a command execution into the `conversation_cache`.
+    fn record_conversation(
+        &self,
+        _cmd: &str,
+        raw_bytes: Option<i64>,
+        filtered_bytes: Option<i64>,
+        plugin_name: Option<String>,
+        output_format: Option<String>,
+    ) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        let session_id = self.ctx.session_id.clone().unwrap_or_default();
+        if session_id.is_empty() {
+            return;
+        }
+        let item_id = format!("{session_id}_{}", self.ctx.cmd_count);
+        let cmd_count = i64::try_from(self.ctx.cmd_count).unwrap_or(i64::MAX);
+        let fut = async move {
+            let _ = store
+                .record_conversation(
+                    "command_output",
+                    &item_id,
+                    None,
+                    cmd_count,
+                    raw_bytes,
+                    filtered_bytes,
+                    plugin_name,
+                    output_format,
+                )
+                .await;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                tokio::task::block_in_place(move || {
+                    handle.block_on(fut);
+                });
+            }
+            Err(_) => {
+                std::thread::spawn(move || {
+                    let Ok(rt) = tokio::runtime::Runtime::new() else {
+                        return;
+                    };
+                    rt.block_on(fut);
+                });
+            }
+        }
     }
 
     /// Collect accumulated nudges into a formatted string, clearing the buffer.
@@ -407,7 +512,7 @@ impl SiftLua {
             format!("{} {}", cmd, args.join(" "))
         };
         // Use exec_command to execute the command directly
-        let (stdout, stderr, exit_code) = exec_command(&full_cmd, "", 0, None)?;
+        let (stdout, stderr, exit_code) = exec_command(&full_cmd, "", 0, None, false, false)?;
         let combined = format!("{stdout}{stderr}");
         Ok((combined, exit_code, "passthrough".to_string()))
     }
@@ -435,6 +540,32 @@ pub fn split_pipeline(input: &str) -> Vec<&str> {
         segments.push(input[start..].trim());
     }
     segments
+}
+
+/// Parse fd redirect patterns (e.g., `2>&1`, `1>&2`) from args.
+/// Returns (`clean_args`, `merge_stderr`) where `merge_stderr` is true if `2>&1` was found.
+fn parse_fd_redirects(args: &[String]) -> (Vec<String>, bool) {
+    let mut clean = Vec::with_capacity(args.len());
+    let mut merge_stderr = false;
+    for arg in args {
+        if arg == "2>&1" {
+            merge_stderr = true;
+        } else if arg == "1>&2" {
+            // Strip but no flag needed — bash handles naturally
+        } else if arg.len() >= 4
+            && arg
+                .as_bytes()
+                .iter()
+                .all(|b| b.is_ascii_digit() || *b == b'>' || *b == b'&')
+            && arg.contains('>')
+            && arg.contains('&')
+        {
+            // Other N>&M patterns — strip but don't set flags for now
+        } else {
+            clean.push(arg.clone());
+        }
+    }
+    (clean, merge_stderr)
 }
 
 /// If `input` starts with `cd <dir> && ` or `cd <dir> ; `, change directory and return the rest.

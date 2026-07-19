@@ -48,30 +48,32 @@ return {
         end
 
         -- Sensitive path bypass
-        if sift.str.is_sensitive(path) then
+        if sift.str.is_sensitive(ctx, path) then
+            local stat = sift.fs.stat(ctx, path)
             local content = sift.fs.read(ctx, path)
             if content == nil then
                 return nil, "sift-read: " .. raw_path .. ": No such file or directory"
             end
             if offset and limit then
-                local lines = sift.str.split_lines(content)
+                local lines = sift.str.split_lines(ctx, content)
                 local start = offset
                 local end_line = math.min(offset + limit - 1, #lines)
-                content = sift.str.slice_text(content, start, end_line)
+                content = sift.str.slice_text(ctx, content, start, end_line)
             elseif offset then
-                local lines = sift.str.split_lines(content)
-                content = sift.str.slice_text(content, offset, #lines)
+                local lines = sift.str.split_lines(ctx, content)
+                content = sift.str.slice_text(ctx, content, offset, #lines)
             end
-            return { status = "handled", output = content, exit_code = 0 }
+            return { status = "handled", output = content, exit_code = 0, raw_bytes = stat.size }
         end
 
         -- Read full file
+        local stat = sift.fs.stat(ctx, path)
         local content = sift.fs.read(ctx, path)
         if content == nil then
             return nil, "sift-read: " .. raw_path .. ": No such file or directory"
         end
 
-        local total_lines = #sift.str.split_lines(content)
+        local total_lines = #sift.str.split_lines(ctx, content)
         local hash = sift.hash.sha256(ctx, content)
 
         -- Compute range
@@ -97,12 +99,14 @@ return {
                     end
                     return {
                         status = "unchanged",
-                        message = msg
+                        message = msg,
+                        raw_bytes = stat.size
                     }
                 end
                 return {
                     status = "unchanged",
-                    message = "[sift] " .. display_name .. " unchanged (cached)\n      (bypass if stale: sift-read --fresh " .. path .. ")"
+                    message = "[sift] " .. display_name .. " unchanged (cached)\n      (bypass if stale: sift-read --fresh " .. path .. ")",
+                    raw_bytes = stat.size
                 }
             end
         end
@@ -137,7 +141,8 @@ return {
                         return {
                             status = "handled",
                             output = header .. diff,
-                            exit_code = 0
+                            exit_code = 0,
+                            raw_bytes = stat.size
                         }
                     end
                 end
@@ -157,13 +162,14 @@ return {
 
         -- Return content (possibly sliced)
         if offset or limit then
-            content = sift.str.slice_text(content, range_start, range_end)
+            content = sift.str.slice_text(ctx, content, range_start, range_end)
         end
 
         return {
             status = "handled",
             output = content,
-            exit_code = 0
+            exit_code = 0,
+            raw_bytes = stat.size
         }
     end
 }

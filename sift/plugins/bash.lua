@@ -15,7 +15,9 @@ return {
         local output, stderr, exit_code = sift.exec(ctx, cmd)
         return {
             status = "handled",
-            exit_code = exit_code
+            output = output,
+            exit_code = exit_code,
+            streamed = true
         }
     end
 }

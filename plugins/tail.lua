@@ -50,7 +50,7 @@ return {
         end
 
         local hash = sift.hash.sha256(ctx, content)
-        local total_lines = #sift.str.split_lines(content)
+        local total_lines = #sift.str.split_lines(ctx, content)
         local range_start = math.max(1, total_lines - parsed.count + 1)
         local range_end = total_lines
 
@@ -74,7 +74,7 @@ return {
         sift.cache.store_content(ctx, hash, content)
         sift.cache.add_range(ctx, hash, range_start, range_end)
 
-        local sliced = sift.str.slice_text(content, range_start, range_end)
+        local sliced = sift.str.slice_text(ctx, content, range_start, range_end)
         return {
             status = "handled",
             output = sliced,

@@ -14,7 +14,8 @@ use crate::session::SessionStore;
 
 pub(crate) mod api;
 pub(crate) mod api_reg_cache;
-pub(crate) mod api_reg_io;
+/// API registration functions for I/O operations (hash, fs, json, toon, jq, env, classify, diff, meta, str, store, gain).
+pub mod api_reg_io;
 pub mod exec;
 pub(crate) mod stdin_reader;
 pub use exec::cleanup_cache;

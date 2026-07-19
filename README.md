@@ -1,6 +1,8 @@
 # sift — AI-optimized shell proxy
 
-**sift** is a shell proxy that intercepts commands, runs them through Lua plugins, and optimizes output for LLM consumption. It reduces token waste by caching repeated reads, summarizing verbose output, and transforming data into compact formats.
+**sift** is a shell proxy that intercepts commands, runs them through Lua plugins, and optimizes output for LLM consumption. Its primary goal is to avoid repeated reads of the same file across different tools (`cat`, `sift-read`, etc.) by caching file content by sha256 hash. It also reduces token waste by transforming verbose output (JSON, TOON) into compact formats.
+
+Inspired by [pi-readcache](https://github.com/Gurpartap/pi-readcache) — a read cache for the pi coding agent that avoids re-reading unchanged files.
 
 ## Quick start
 
@@ -20,26 +22,78 @@ AI_SESSION=my-session ./target/release/sift -c "cat foo.rs"
 
 ## How it works
 
+When an agent runs a command through sift, the command is classified and dispatched to the best matching plugin:
+
 ```
-User runs: cat foo.rs
+sift -c "cat foo.rs"
        │
        ▼
-  sift parses and classifies the command
+  classify: name="cat", args=["foo.rs"]
        │
-       ├── cat.lua (plugin) intercepts "cat"
-       │     ├── reads file via sift.fs.read(ctx, path)
-       │     ├── sha256 hash → check file-based cache
-       │     ├── cache hit → "[sift] foo.rs unchanged" + bypass nudge
-       │     └── cache miss → store content by hash, return content
+       ▼
+  find_plugin: pattern "cat" → cat.lua
        │
-       ├── sift-read.lua (plugin) intercepts "sift-read"
-       │     ├── supports offset/limit for range reads
-       │     ├── --fresh flag bypasses cache
-       │     ├── on cache miss: loads old content, emits unified diff
-       │     └── shares cache with cat.lua (cross-plugin dedup)
+       ▼
+  cat.lua.execute(ctx, ["foo.rs"], stdin)
        │
-       └── bash.lua (default fallback) runs via PTY
-             └── output streams to stdout in real-time
+       ├── reads file via sift.fs.read(ctx, path)
+       ├── sha256 hash → check file-based cache
+       ├── cache hit → "[sift] foo.rs unchanged" + bypass nudge
+       └── cache miss → store content by hash, return content
+```
+
+Other plugins follow the same pattern — classification, matching, execution:
+
+## Cross-tool caching
+
+The core innovation: `cat` and `sift-read` share the same file-based cache. If you read a file with `cat`, then read it again with `sift-read`, the second read detects the hash and returns "unchanged" — no re-reading from disk, no re-emitting content to the model.
+
+```
+cat Cargo.toml          → caches by sha256
+sift-read Cargo.toml    → cache hit → "[sift] Cargo.toml unchanged"
+```
+
+This is the same principle as pi-readcache: avoid re-transmitting content the model has already seen.
+
+## Token reduction
+
+Beyond caching, sift reduces token consumption by:
+
+- **JSON compaction**: truncates long strings, summarizes large arrays, limits depth/keys
+- **TOON format**: Token-Oriented Object Notation — a compact, human-readable format for structured data (30-50% fewer tokens than JSON)
+- **Smart format selection**: `sift.json.shortest()` tries raw, compacted JSON, and TOON, selects the most token-efficient representation
+- **Unchanged detection**: emits a short nudge instead of re-emitting file content
+- **Range reads**: `sift-read file 5 10` reads only the lines the model needs
+- **Curl JSON optimization**: auto-detects JSON responses, compresses them, stores raw for re-read
+
+## Behavioral plugins
+
+Beyond optimization, sift can enforce agent behavior:
+
+- **git-commit hook**: forbids `-n`/`--no-verify` on `git commit`, returns exit code 1 with nudge explaining hooks must run. Prevents accidental hook bypass.
+- **Curl JSON optimizer**: auto-detects JSON responses via `-w "%{content_type}"`, compresses with `sift.json.shortest()`, stores raw JSON for re-read. Respects `-v`/`--verbose` (full output) and `-w`/`--write-out` (passthrough). Always propagates curl exit code.
+
+## Gain tracking
+
+sift tracks token reduction per command and per session. Run `sift --gain` to see aggregate stats:
+
+```
+$ AI_SESSION=my-session sift --gain
+sift gain
+─────────────────────────────────────
+  Commands:    47
+  Raw:         1.2 MB
+  Filtered:    340 KB
+  Reduction:   71.7% (8,944 bps)
+  Bypasses:    3
+  ─────────────────────────────────────
+  Per plugin:
+    cat.lua             15 calls   82.3% reduction
+    sift-read.lua       12 calls   65.1% reduction
+    bash.lua            10 calls    0.0% reduction
+    command.lua          3 calls   (bypass)
+  ─────────────────────────────────────
+  Session: my-session
 ```
 
 ## Lua plugin API
@@ -53,7 +107,7 @@ return {
     priority = 0,
     pattern = "my-command",       -- string or string[] for multi-pattern
     execute = function(ctx, args, stdin)
-        -- ctx: { cwd, cmd_count, session_id, command }
+        -- ctx: { cwd, cmd_count, session_id, command, merge_stderr }
         -- args: command arguments (table)
         -- stdin: piped input (string or nil)
         return {
@@ -74,6 +128,16 @@ return {
 | `"unchanged"` | Output identical to previous invocation. Emits short marker + nudge. |
 | `nil, error` | Plugin failed. Falls through to next matching plugin. |
 
+### Plugin return fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | string | `"handled"`, `"passthrough"`, or `"unchanged"` |
+| `output` | string | Output to send to the agent |
+| `exit_code` | integer | Process exit code |
+| `raw_bytes` | integer (optional) | Size of raw output before transformation (for gain tracking) |
+| `streamed` | boolean (optional) | If true, output was already streamed to stdout; dispatch won't print again |
+
 ### Built-in plugins
 
 | Plugin | Priority | Pattern | Description |
@@ -88,16 +152,31 @@ return {
 |--------|---------|-------------|
 | `sift-read.lua` | `"sift-read"` | File read with offset/limit, hash caching, unified diff on change, `--fresh` bypass |
 | `cat.lua` | `"cat"` | File read caching (shares cache with sift-read) |
+| `head.lua` | `"head"` | First N lines of a file with caching |
+| `tail.lua` | `"tail"` | Last N lines of a file with caching |
+| `sed.lua` | `"sed"` | Line range extraction with caching |
+| `curl.lua` | `"curl"` | JSON response optimizer — detects JSON, compresses via TOON, stores raw for re-read |
+| `git-commit.lua` | `"git commit"` | Forbids `-n`/`--no-verify` on git commit, returns exit 1 + nudge |
 | `openspec.lua` | `"openspec"` | Injects `--json` flag, converts output via `sift.json.shortest()` |
 | `rtk.lua` | `"*"` (wildcard) | Delegates unmatched commands to `rtk` binary |
 
 ### `sift.*` API reference
 
-All functions take `ctx` as first argument for API consistency.
+All functions take `ctx` as first argument for API consistency. The `ctx` table has the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cwd` | string | Current working directory |
+| `cmd_count` | integer | Command counter for this session |
+| `session_id` | string | Current session ID |
+| `command` | string | The original command string |
+| `merge_stderr` | boolean | Whether stderr should be merged (from `2>&1` redirect) |
 
 ```
-sift.exec(ctx, cmd, {transform?}) → output, stderr, exit_code
+sift.exec(ctx, cmd, {transform?, silent?, merge_stderr?}) → output, stderr, exit_code
   -- transform: optional function(chunk) → string for streaming transforms
+  -- silent: if true, suppress stdout printing (for plugins that return output)
+  -- merge_stderr: if true, keep streams separate, transform stdout only, append stderr raw
 sift.log.{info,warn,error,debug}(ctx, msg)
 sift.nudge(ctx, msg)              -- accumulate nudge message
 sift.exit(ctx, code)              -- exit process
@@ -126,8 +205,12 @@ sift.fs.exists(ctx, path)         → boolean
 sift.json.encode(ctx, val)        → JSON string
 sift.json.decode(ctx, str)        → Lua table
 sift.json.shortest(ctx, raw, formats)  → token-optimized JSON
-sift.toon.encode(ctx, val)        → TOON string (token-optimized)
-sift.toon.decode(ctx, str)        → Lua table
+sift.toon.encode(data, options?)  → TOON string (pure, no ctx)
+  -- options.delimiter: "comma" | "pipe"
+  -- options.indent: "space2" | "space4"
+sift.toon.decode(str, options?)   → Lua table (pure, no ctx)
+  -- options.strict: true | false
+  -- options.no_coerce: true | false
 sift.jq.query(ctx, data, filter)  → JSON result
 
 sift.diff(ctx, old, new)          → unified diff string (via similar crate)
@@ -139,6 +222,17 @@ sift.env.set(ctx, key, val)       -- set environment variable
 
 sift.classify(ctx, cmd)           → {name, args, is_piped, is_compound}
 sift.token_count(ctx, text)       → estimated token count
+
+sift.str.split_lines(text)        → {line1, line2, ...}  (pure, no ctx)
+sift.str.slice_text(text, start, end) → string (pure, no ctx)
+sift.str.is_sensitive(path)        → boolean (pure, no ctx)
+
+sift.gain.report(flags?)          → gain report string
+  -- flags.verbose: true | false
+  -- flags.json: true | false
+  -- flags.all: true | false (all sessions)
+  -- flags.session: "session-id"
+  -- flags.since: timestamp_ms
 
 sift.meta.session_id              -- current session ID
 sift.meta.cmd_count               -- command counter
@@ -204,6 +298,42 @@ sift-read Cargo.toml
 
 Shares cache with `cat` plugin — `cat file.txt` then `sift-read file.txt` detects "unchanged" and vice versa.
 
+## curl plugin
+
+The `curl` plugin auto-detects JSON responses and compresses them:
+
+```bash
+# JSON response — compressed via TOON, raw stored for re-read
+curl https://jsonplaceholder.typicode.com/posts
+# → [100]{userId,id,title,body}: ...
+
+# Verbose requested — full output, no compression
+curl -v https://api.example.com/data
+
+# Custom -w format — passthrough, no interference
+curl -w "\n%{http_code}" https://api.example.com/data
+
+# Non-JSON response — body returned as-is
+curl https://example.com/page.html
+```
+
+## git-commit plugin
+
+The `git-commit` plugin prevents accidental hook bypass:
+
+```bash
+# Forbidden — returns exit 1 with nudge
+git commit -m "fix" -n
+# → [sift] git commit --no-verify (-n) is forbidden: hooks must run
+
+# Allowed — passthrough to rtk
+git commit -m "fix"
+
+# Other git commands — passthrough to rtk
+git status
+git push
+```
+
 ## Streaming output
 
 All command output streams to stdout/stderr in real-time via background reader threads. Plugins can transform chunks in-flight:
@@ -241,7 +371,7 @@ File content is stored by sha256 hash at `/tmp/sift/<session>/`:
 sift loads plugins from these locations (later overrides earlier at same priority):
 
 1. **Built-in** — `bash.lua`, `command.lua`, `reset.lua` (embedded in binary)
-2. **`plugins/`** — shipped optional plugins (`cat.lua`, `sift-read.lua`, `openspec.lua`, `rtk.lua`)
+2. **`plugins/`** — shipped optional plugins (`cat.lua`, `sift-read.lua`, `head.lua`, `tail.lua`, `sed.lua`, `curl.lua`, `git-commit.lua`, `openspec.lua`, `rtk.lua`)
 3. **`~/.config/sift/plugins/`** — user plugins
 4. **`$SIFT_PLUGINS`** — colon-separated paths
 
@@ -293,9 +423,14 @@ sift-read --fresh foo.rs
 sift/
 ├── plugins/             # Shipped optional plugins (filesystem-loaded)
 │   ├── cat.lua
-│   ├── sift-read.lua
+│   ├── curl.lua
+│   ├── git-commit.lua
+│   ├── head.lua
 │   ├── openspec.lua
-│   └── rtk.lua
+│   ├── rtk.lua
+│   ├── sed.lua
+│   ├── sift-read.lua
+│   └── tail.lua
 ├── sift-core/           # Core library: Lua runtime, session store, classifier
 │   └── src/
 │       ├── lua/         # Lua VM, sift.* API, plugin dispatch

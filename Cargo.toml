@@ -9,6 +9,11 @@ unsafe_code = "forbid"
 all = "deny"
 pedantic = "deny"
 nursery = "deny"
+unwrap_used = "deny"
+# expect are forbidden
+expect_used = "deny"
+# panics are forbidden
+panic = "deny"
 
 [workspace.dependencies]
 anyhow = "1"

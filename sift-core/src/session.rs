@@ -398,6 +398,108 @@ impl SessionStore {
             .await?;
         Ok(())
     }
+
+    /// Query conversation entries for gain reporting.
+    /// Filters by `session_id` prefix if provided.
+    pub async fn query_conversations(
+        &self,
+        session_filter: Option<&str>,
+    ) -> Result<Vec<ConversationEntry>> {
+        let rows = if let Some(sid) = session_filter {
+            let prefix = format!("{sid}_");
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    Option<i32>,
+                    i64,
+                    i64,
+                    i64,
+                    i32,
+                    i32,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<String>,
+                    Option<String>,
+                ),
+            >(
+                "SELECT item_type, item_id, estimated_tokens, commands_since_at_create,
+                        first_shown, last_shown, shown_count, re_requested,
+                        raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format
+                 FROM conversation_cache
+                 WHERE item_type = 'command_output' AND item_id LIKE ?1",
+            )
+            .bind(format!("{prefix}%"))
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    Option<i32>,
+                    i64,
+                    i64,
+                    i64,
+                    i32,
+                    i32,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<i64>,
+                    Option<String>,
+                    Option<String>,
+                ),
+            >(
+                "SELECT item_type, item_id, estimated_tokens, commands_since_at_create,
+                        first_shown, last_shown, shown_count, re_requested,
+                        raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format
+                 FROM conversation_cache
+                 WHERE item_type = 'command_output'",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    item_type,
+                    item_id,
+                    estimated_tokens,
+                    commands_since_at_create,
+                    first_shown,
+                    last_shown,
+                    shown_count,
+                    re_requested,
+                    raw_bytes,
+                    filtered_bytes,
+                    reduction_bps,
+                    plugin_name,
+                    output_format,
+                )| {
+                    ConversationEntry {
+                        item_type,
+                        item_id,
+                        estimated_tokens,
+                        commands_since_at_create,
+                        first_shown,
+                        last_shown,
+                        shown_count,
+                        re_requested,
+                        raw_bytes,
+                        filtered_bytes,
+                        reduction_bps,
+                        plugin_name,
+                        output_format,
+                    }
+                },
+            )
+            .collect())
+    }
 }
 
 #[cfg(test)]

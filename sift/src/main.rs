@@ -29,6 +29,10 @@ struct Args {
     /// Start an interactive REPL session.
     #[arg(long = "shell")]
     shell: bool,
+
+    /// Show gain report (token reduction stats).
+    #[arg(long = "gain")]
+    gain: bool,
 }
 
 #[tokio::main]
@@ -37,6 +41,29 @@ async fn main() -> Result<()> {
 
     let mut session = Session::from_env();
     session.open_store().await;
+
+    // Handle --gain flag: print gain report and exit
+    if args.gain {
+        if let Some(ref store) = session.store {
+            let session_id = session.session_id.clone();
+            let flags = sift_core::lua::api_reg_io::GainFlags {
+                verbose: false,
+                json: false,
+                all: false,
+                session: None,
+                since: None,
+            };
+            let effective_session = session_id.as_deref();
+            let report =
+                sift_core::lua::api_reg_io::generate_gain_report(store, effective_session, &flags)
+                    .await?;
+            let output = sift_core::lua::api_reg_io::format_gain_report(&report, effective_session);
+            print!("{output}");
+        } else {
+            eprintln!("sift: no session store. Set AI_SESSION to enable tracking.");
+        }
+        return Ok(());
+    }
 
     let ctx = SiftContext {
         cwd: session.cwd.clone(),
@@ -61,14 +88,19 @@ async fn main() -> Result<()> {
     // Load user plugins from filesystem
     load_user_plugins(&mut lua);
 
-    match args.command {
-        Some(cmd) => agent_mode(&lua, &cmd),
-        None if args.shell => repl_mode(&lua),
-        None => {
-            // No command and no --shell: read from stdin
-            repl_mode(&lua)
+    let exit_code = match args.command {
+        Some(cmd) => agent_mode(&lua, &cmd)?,
+        None if args.shell => {
+            repl_mode(&lua)?;
+            0
         }
-    }
+        None => {
+            repl_mode(&lua)?;
+            0
+        }
+    };
+
+    std::process::exit(exit_code);
 }
 
 /// Load all built-in Lua plugins.
@@ -122,10 +154,10 @@ fn load_plugins_from_dir(lua: &mut SiftLua, dir: &PathBuf) {
 }
 
 /// Agent mode: execute a command and output the result.
-fn agent_mode(lua: &SiftLua, cmd: &str) -> Result<()> {
+fn agent_mode(lua: &SiftLua, cmd: &str) -> Result<i32> {
     let (_output, exit_code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>)?;
 
-    std::process::exit(exit_code);
+    Ok(exit_code)
 }
 
 /// REPL mode: read commands from stdin.

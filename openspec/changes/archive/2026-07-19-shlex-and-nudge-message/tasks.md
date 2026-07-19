@@ -11,10 +11,10 @@
 
 ## 2. Fix nudge message format
 
-- [ ] Update `plugins/sift-read.lua` unchanged message to single-line format with "bypass if stale"
-- [ ] Update `plugins/cat.lua` unchanged message to single-line format
-- [ ] Update `plugins/sed.lua` unchanged message to single-line format
-- [ ] Update `plugins/head.lua` unchanged message to single-line format
-- [ ] Update `plugins/tail.lua` unchanged message to single-line format
+- [x] Update `plugins/sift-read.lua` unchanged message to single-line format with "bypass if stale"
+- [x] Update `plugins/cat.lua` unchanged message to single-line format
+- [x] Update `plugins/sed.lua` unchanged message to single-line format
+- [x] Update `plugins/head.lua` unchanged message to single-line format
+- [x] Update `plugins/tail.lua` unchanged message to single-line format
 - [x] Update diff header to `[sift: N lines changed of M]` (no bypass nudge)
 - [x] Run tests to verify

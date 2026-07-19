@@ -64,29 +64,24 @@ fn test_sift_str_split_lines() {
     let sift: Table = lua.lua.globals().get("sift").unwrap();
     let str_tbl: Table = sift.get("str").unwrap();
     let split_lines: mlua::Function = str_tbl.get("split_lines").unwrap();
+    let ctx = lua.lua.create_table().unwrap();
 
     // With trailing newline
-    let result: Table = split_lines
-        .call(("a\nb\nc\n",))
-        .unwrap();
+    let result: Table = split_lines.call((ctx.clone(), "a\nb\nc\n")).unwrap();
     assert_eq!(result.get::<String>(1).unwrap(), "a");
     assert_eq!(result.get::<String>(2).unwrap(), "b");
     assert_eq!(result.get::<String>(3).unwrap(), "c");
     assert_eq!(result.get::<String>(4).unwrap(), "");
 
     // Without trailing newline
-    let result2: Table = split_lines
-        .call(("a\nb\nc",))
-        .unwrap();
+    let result2: Table = split_lines.call((ctx.clone(), "a\nb\nc")).unwrap();
     assert_eq!(result2.get::<String>(1).unwrap(), "a");
     assert_eq!(result2.get::<String>(2).unwrap(), "b");
     assert_eq!(result2.get::<String>(3).unwrap(), "c");
     assert!(result2.get::<String>(4).is_err());
 
     // Empty string
-    let result3: Table = split_lines
-        .call(("",))
-        .unwrap();
+    let result3: Table = split_lines.call((ctx, "")).unwrap();
     assert_eq!(result3.get::<String>(1).unwrap(), "");
 }
 
@@ -96,23 +91,20 @@ fn test_sift_str_slice_text() {
     let sift: Table = lua.lua.globals().get("sift").unwrap();
     let str_tbl: Table = sift.get("str").unwrap();
     let slice_text: mlua::Function = str_tbl.get("slice_text").unwrap();
+    let ctx = lua.lua.create_table().unwrap();
 
     // Slice within bounds
     let result: String = slice_text
-        .call(("a\nb\nc\nd", 2u64, 3u64))
+        .call((ctx.clone(), "a\nb\nc\nd", 2u64, 3u64))
         .unwrap();
     assert_eq!(result, "b\nc");
 
     // Slice past end
-    let result2: String = slice_text
-        .call(("a\nb", 5u64, 10u64))
-        .unwrap();
+    let result2: String = slice_text.call((ctx.clone(), "a\nb", 5u64, 10u64)).unwrap();
     assert_eq!(result2, "");
 
     // Single line
-    let result3: String = slice_text
-        .call(("hello", 1u64, 1u64))
-        .unwrap();
+    let result3: String = slice_text.call((ctx, "hello", 1u64, 1u64)).unwrap();
     assert_eq!(result3, "hello");
 }
 
@@ -122,24 +114,25 @@ fn test_sift_str_is_sensitive() {
     let sift: Table = lua.lua.globals().get("sift").unwrap();
     let str_tbl: Table = sift.get("str").unwrap();
     let is_sensitive: mlua::Function = str_tbl.get("is_sensitive").unwrap();
+    let ctx = lua.lua.create_table().unwrap();
 
     // Sensitive paths
     assert!(is_sensitive
-        .call::<bool>((".env.production",))
+        .call::<bool>((ctx.clone(), ".env.production",))
         .unwrap());
     assert!(is_sensitive
-        .call::<bool>(("/path/to/key.pem",))
+        .call::<bool>((ctx.clone(), "/path/to/key.pem",))
         .unwrap());
     assert!(is_sensitive
-        .call::<bool>(("/path/to/.ssh/id_rsa",))
+        .call::<bool>((ctx.clone(), "/path/to/.ssh/id_rsa",))
         .unwrap());
 
     // Non-sensitive paths
     assert!(!is_sensitive
-        .call::<bool>(("/path/to/main.rs",))
+        .call::<bool>((ctx.clone(), "/path/to/main.rs",))
         .unwrap());
     assert!(!is_sensitive
-        .call::<bool>((test_ctx(&lua.lua), "/path/to/readme.md"))
+        .call::<bool>((ctx, "/path/to/readme.md",))
         .unwrap());
 }
 
@@ -158,7 +151,12 @@ fn test_plugin_load_and_dispatch() {
     "#;
     lua.load_plugin_from_str("test", plugin_code).unwrap();
     let (output, exit_code, plugin) = lua
-        .dispatch("test-cmd", &["arg1".to_string()], None::<mlua::Value>)
+        .dispatch(
+            "test-cmd",
+            &["arg1".to_string()],
+            None::<mlua::Value>,
+            false,
+        )
         .unwrap();
     assert_eq!(output, "test: arg1");
     assert_eq!(exit_code, 0);
@@ -179,7 +177,9 @@ fn test_plugin_dispatch_fallback() {
         }
     "#;
     lua.load_plugin_from_str("default", plugin_code).unwrap();
-    let (output, _exit_code, _plugin) = lua.dispatch("unknown-cmd", &[], None::<mlua::Value>).unwrap();
+    let (output, _exit_code, _plugin) = lua
+        .dispatch("unknown-cmd", &[], None::<mlua::Value>, false)
+        .unwrap();
     assert_eq!(output, "fallback");
 }
 
@@ -190,7 +190,9 @@ fn test_plugin_priority_ordering() {
     let high = r#"return { name = "test", priority = 100, pattern = "test", execute = function() return { status = "handled", output = "high", exit_code = 0 } end }"#;
     lua.load_plugin_from_str("low", low).unwrap();
     lua.load_plugin_from_str("high", high).unwrap();
-    let (output, _exit_code, _plugin) = lua.dispatch("test", &[], None::<mlua::Value>).unwrap();
+    let (output, _exit_code, _plugin) = lua
+        .dispatch("test", &[], None::<mlua::Value>, false)
+        .unwrap();
     assert_eq!(output, "high");
 }
 
@@ -390,9 +392,10 @@ fn test_sift_toon_encode() {
     let sift: Table = lua.lua.globals().get("sift").unwrap();
     let toon: Table = sift.get("toon").unwrap();
     let encode: mlua::Function = toon.get("encode").unwrap();
+    let ctx = lua.lua.create_table().unwrap();
     let tbl = lua.lua.create_table().unwrap();
     tbl.set("name", "test").unwrap();
-    let encoded: String = encode.call((test_ctx(&lua.lua), tbl)).unwrap();
+    let encoded: String = encode.call((ctx, tbl)).unwrap();
     assert!(encoded.contains("name"));
 }
 
@@ -431,7 +434,7 @@ fn test_sift_meta() {
 
 #[test]
 fn test_exec_command() {
-    let (stdout, stderr, code) = exec_command("echo hello", "test", 0, None).unwrap();
+    let (stdout, stderr, code) = exec_command("echo hello", "test", 0, None, false, false).unwrap();
     assert!(
         stdout.contains("hello"),
         "stdout should contain hello, got: {stdout}"
@@ -442,7 +445,8 @@ fn test_exec_command() {
 
 #[test]
 fn test_exec_command_with_stderr() {
-    let (stdout, stderr, code) = exec_command("echo out && echo err >&2", "test", 0, None).unwrap();
+    let (stdout, stderr, code) =
+        exec_command("echo out && echo err >&2", "test", 0, None, false, false).unwrap();
     assert!(
         stdout.contains("out"),
         "stdout should contain out, got: {stdout}"
@@ -456,7 +460,7 @@ fn test_exec_command_with_stderr() {
 
 #[test]
 fn test_exec_command_exit_code() {
-    let (_stdout, _stderr, code) = exec_command("exit 42", "test", 0, None).unwrap();
+    let (_stdout, _stderr, code) = exec_command("exit 42", "test", 0, None, false, false).unwrap();
     assert_eq!(code, 42, "exit code should be 42, got {code}");
 }
 
@@ -484,7 +488,9 @@ fn test_dispatch_full_simple() {
         }
     "#;
     lua.load_plugin_from_str("test", plugin_code).unwrap();
-    let (output, exit_code, _plugin) = lua.dispatch_full("test-cmd arg1", None::<mlua::Value>).unwrap();
+    let (output, exit_code, _plugin) = lua
+        .dispatch_full("test-cmd arg1", None::<mlua::Value>)
+        .unwrap();
     assert_eq!(output, "ok");
     assert_eq!(exit_code, 0);
 }
@@ -533,7 +539,9 @@ fn test_dispatch_full_cd_prefix() {
         }
     "#;
     lua.load_plugin_from_str("test", plugin_code).unwrap();
-    let (output, exit_code, _plugin) = lua.dispatch_full("cd /tmp && test-cmd", None::<mlua::Value>).unwrap();
+    let (output, exit_code, _plugin) = lua
+        .dispatch_full("cd /tmp && test-cmd", None::<mlua::Value>)
+        .unwrap();
     assert_eq!(output, "cd-dispatched");
     assert_eq!(exit_code, 0);
 }
@@ -552,7 +560,9 @@ fn test_dispatch_full_pipeline_fallback() {
         }
     "#;
     lua.load_plugin_from_str("default", default_code).unwrap();
-    let (output, exit_code, _plugin) = lua.dispatch_full("echo hello | grep hello", None::<mlua::Value>).unwrap();
+    let (output, exit_code, _plugin) = lua
+        .dispatch_full("echo hello | grep hello", None::<mlua::Value>)
+        .unwrap();
     assert_eq!(output, "fallback");
     assert_eq!(exit_code, 0);
 }
@@ -580,7 +590,9 @@ fn test_dispatch_unchanged_nudge() {
         }
     "#;
     lua.load_plugin_from_str("test", plugin_code).unwrap();
-    let (output, exit_code, _plugin) = lua.dispatch("test-cmd", &[], None::<mlua::Value>).unwrap();
+    let (output, exit_code, _plugin) = lua
+        .dispatch("test-cmd", &[], None::<mlua::Value>, false)
+        .unwrap();
     assert!(
         output.contains("[sift] foo.rs unchanged since last read"),
         "output: {output}"
@@ -657,7 +669,9 @@ fn test_stdin_reader_pipeline() {
     lua.load_plugin_from_str("stdin-cap", plugin_code).unwrap();
 
     // Pipeline: echo pipes to stdin-cap
-    let (output, exit_code, _plugin) = lua.dispatch_full("echo hello | stdin-cap", None::<mlua::Value>).unwrap();
+    let (output, exit_code, _plugin) = lua
+        .dispatch_full("echo hello | stdin-cap", None::<mlua::Value>)
+        .unwrap();
     assert_eq!(exit_code, 0, "output: {output}");
     assert!(output.contains("HELLO"), "output: {output}");
 }

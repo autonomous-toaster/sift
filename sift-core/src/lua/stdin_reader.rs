@@ -43,7 +43,9 @@ impl StdinReader {
 
     /// Read the entire stream into a string (for backward compat).
     pub fn read_to_string(&self) -> std::io::Result<String> {
-        let mut guard = self.inner.lock().unwrap();
+        let Ok(mut guard) = self.inner.lock() else {
+            return Ok(String::new());
+        };
         match &mut *guard {
             Inner::File(r) => {
                 let mut s = String::new();
@@ -79,16 +81,20 @@ impl UserData for StdinReader {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // __tostring metamethod for backward compat (tostring(stdin))
         methods.add_meta_method("__tostring", |_lua, reader, ()| {
-            let mut guard = reader.inner.lock().unwrap();
+            let Ok(mut guard) = reader.inner.lock() else {
+                return Ok(String::new());
+            };
             match &mut *guard {
                 Inner::File(r) => {
                     let mut s = String::new();
-                    r.read_to_string(&mut s).map_err(|e| mlua::Error::external(format!("read: {e}")))?;
+                    r.read_to_string(&mut s)
+                        .map_err(|e| mlua::Error::external(format!("read: {e}")))?;
                     Ok(s)
                 }
                 Inner::String(r) => {
                     let mut s = String::new();
-                    r.read_to_string(&mut s).map_err(|e| mlua::Error::external(format!("read: {e}")))?;
+                    r.read_to_string(&mut s)
+                        .map_err(|e| mlua::Error::external(format!("read: {e}")))?;
                     Ok(s)
                 }
             }
@@ -96,7 +102,9 @@ impl UserData for StdinReader {
 
         // stdin:readline() -> string | nil
         methods.add_method("readline", |lua, reader, ()| {
-            let mut guard = reader.inner.lock().unwrap();
+            let Ok(mut guard) = reader.inner.lock() else {
+                return Ok(mlua::Value::Nil);
+            };
             match Self::readline_inner(&mut guard) {
                 Ok(Some(line)) => Ok(Value::String(lua.create_string(&line)?)),
                 Ok(None) => Ok(Value::Nil),
@@ -106,27 +114,32 @@ impl UserData for StdinReader {
 
         // stdin:read(n) -> string | nil
         methods.add_method("read", |lua, reader, n: u64| {
+            #[allow(clippy::cast_possible_truncation)]
             let n = n as usize;
             let mut buf = vec![0u8; n];
-            let mut guard = reader.inner.lock().unwrap();
+            let Ok(mut guard) = reader.inner.lock() else {
+                return Ok(mlua::Value::Nil);
+            };
             let bytes_read = match &mut *guard {
                 Inner::File(r) => r.read(&mut buf)?,
                 Inner::String(r) => r.read(&mut buf)?,
             };
             if bytes_read == 0 {
-                return Ok(Value::Nil);
+                return Ok(mlua::Value::Nil);
             }
             buf.truncate(bytes_read);
             let s = String::from_utf8_lossy(&buf).to_string();
-            Ok(Value::String(lua.create_string(&s)?))
+            Ok(mlua::Value::String(lua.create_string(&s)?))
         });
 
         // stdin:lines() -> iterator function
         methods.add_method("lines", |lua, reader, ()| {
             let inner = Arc::clone(&reader.inner);
             let func = lua.create_function(move |lua, ()| {
-                let mut guard = inner.lock().unwrap();
-                match StdinReader::readline_inner(&mut guard) {
+                let Ok(mut guard) = inner.lock() else {
+                    return Ok(Value::Nil);
+                };
+                match Self::readline_inner(&mut guard) {
                     Ok(Some(line)) => Ok(Value::String(lua.create_string(&line)?)),
                     Ok(None) => Ok(Value::Nil),
                     Err(e) => Err(mlua::Error::external(format!("readline: {e}"))),
@@ -184,9 +197,9 @@ mod tests {
         let reader = StdinReader::from_string("hello\nworld\n".to_string());
         let globals = lua.globals();
         globals.set("r", reader).unwrap();
-        let result: mlua::Result<()> = lua.load(
-            "local s = tostring(r)\nassert(s == 'hello\\nworld\\n')\n"
-        ).exec();
+        let result: mlua::Result<()> = lua
+            .load("local s = tostring(r)\nassert(s == 'hello\\nworld\\n')\n")
+            .exec();
         assert!(result.is_ok(), "{result:?}");
     }
 

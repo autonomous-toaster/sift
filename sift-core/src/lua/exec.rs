@@ -46,6 +46,8 @@ pub(crate) fn exec_command(
     _session_id: &str,
     _cmd_count: u64,
     transform: Option<TransformFn>,
+    silent: bool,
+    _merge_stderr: bool,
 ) -> Result<(String, String, i32), mlua::Error> {
     let bash_path = find_real_bash();
     let mut child = std::process::Command::new(&bash_path)
@@ -84,8 +86,10 @@ pub(crate) fn exec_command(
                 Ok(n) => {
                     let s = String::from_utf8_lossy(&chunk[..n]).to_string();
                     let output = transform.as_ref().map_or_else(|| s.clone(), |t| t(&s));
-                    print!("{output}");
-                    let _ = std::io::stdout().flush();
+                    if !silent {
+                        print!("{output}");
+                        let _ = std::io::stdout().flush();
+                    }
                     collected.push_str(&output);
                 }
                 Err(e) => {
@@ -109,8 +113,10 @@ pub(crate) fn exec_command(
                 Ok(0) => break,
                 Ok(n) => {
                     let s = String::from_utf8_lossy(&chunk[..n]).to_string();
-                    eprint!("{s}");
-                    let _ = std::io::stderr().flush();
+                    if !silent {
+                        eprint!("{s}");
+                        let _ = std::io::stderr().flush();
+                    }
                     collected.push_str(&s);
                 }
                 Err(e) => {

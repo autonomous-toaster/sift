@@ -6,9 +6,9 @@
 
 ## 2. Add plugin unit tests
 
-- [ ] 2.1 Create `tests_plugins.rs` with smoke test loading all `.lua` files and verifying full `sift.*` API visibility
-- [ ] 2.2 Add per-plugin execution tests for sift-read, cat, head, tail, sed with fixture files
-- [ ] 2.3 Wire `tests_plugins.rs` into the module tree and verify all tests pass
+- [x] 2.1 Create `tests_plugins.rs` with smoke test loading all `.lua` files and verifying full `sift.*` API visibility
+- [x] 2.2 Add per-plugin execution tests for sift-read, cat, head, tail, sed with fixture files
+- [x] 2.3 Wire `tests_plugins.rs` into the module tree and verify all tests pass
 
 ## 3. Fix clippy violations
 
@@ -22,4 +22,4 @@
 
 ## 4. Update README
 
-- [ ] 4.1 Update `sift.str.*` API reference in README to document pure-function signatures without `ctx`
+- [x] 4.1 Update `sift.str.*` API reference in README to document pure-function signatures without `ctx`

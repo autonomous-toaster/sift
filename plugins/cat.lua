@@ -51,14 +51,16 @@ return {
         end
 
         -- Sensitive path bypass: don't cache
-        if sift.str.is_sensitive(path) then
+        if sift.str.is_sensitive(ctx, path) then
+            local stat = sift.fs.stat(ctx, path)
             local content = sift.fs.read(ctx, path)
             if content == nil then
                 return nil, "cat: " .. args[1] .. ": No such file or directory"
             end
-            return { status = "handled", output = content, exit_code = 0 }
+            return { status = "handled", output = content, exit_code = 0, raw_bytes = stat.size }
         end
 
+        local stat = sift.fs.stat(ctx, path)
         local content = sift.fs.read(ctx, path)
         if content == nil then
             return nil, "cat: " .. args[1] .. ": No such file or directory"
@@ -72,7 +74,8 @@ return {
             local display_name = path:match("([^/]+)$") or args[1]
             return {
                 status = "unchanged",
-                message = "[sift] " .. display_name .. " unchanged (cached)\n      (bypass if stale: command cat " .. path .. ")"
+                message = "[sift] " .. display_name .. " unchanged (cached)\n      (bypass if stale: command cat " .. path .. ")",
+                raw_bytes = stat.size
             }
         end
 
@@ -93,7 +96,8 @@ return {
         return {
             status = "handled",
             output = content,
-            exit_code = 0
+            exit_code = 0,
+            raw_bytes = stat.size
         }
     end
 }

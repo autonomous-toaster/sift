@@ -24,7 +24,7 @@ return {
             parts[#parts + 1] = "--json"
         end
         local cmd = table.concat(parts, " ")
-        local output, stderr, exit_code = sift.exec(ctx, cmd)
+        local output, stderr, exit_code = sift.exec(ctx, cmd, {silent = true})
 
         if exit_code ~= 0 then
             return {
