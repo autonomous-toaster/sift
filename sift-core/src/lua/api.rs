@@ -563,7 +563,25 @@ pub fn split_pipeline(input: &str) -> Vec<&str> {
 
 /// Parse fd redirect patterns (e.g., `2>&1`, `1>&2`) from args.
 /// Returns (`clean_args`, `merge_stderr`) where `merge_stderr` is true if `2>&1` was found.
+/// Avoids allocation when no fd redirects are present.
 fn parse_fd_redirects(args: &[String]) -> (Vec<String>, bool) {
+    // Fast path: check if any arg is a fd redirect pattern
+    let has_redirect = args.iter().any(|arg| {
+        arg == "2>&1"
+            || arg == "1>&2"
+            || (arg.len() >= 4
+                && arg
+                    .as_bytes()
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || *b == b'>' || *b == b'&')
+                && arg.contains('>')
+                && arg.contains('&'))
+    });
+
+    if !has_redirect {
+        return (args.to_vec(), false);
+    }
+
     let mut clean = Vec::with_capacity(args.len());
     let mut merge_stderr = false;
     for arg in args {
