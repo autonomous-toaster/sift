@@ -1,6 +1,8 @@
 -- git-commit.lua — forbid -n/--no-verify on git commit
 -- Returns non-zero exit code with nudge when hooks are bypassed.
--- All other git commands passthrough to rtk.
+-- When -n is absent, passthrough runs the command directly in bash.
+-- Other git commands (status, push, etc.) don't match "git commit" pattern
+-- and fall through to the wildcard plugin (rtk.lua) or default (bash.lua).
 
 return {
     name = "git-commit",
@@ -45,7 +47,8 @@ return {
             end
         end
 
-        -- No -n/--no-verify found: passthrough to rtk
+        -- No -n/--no-verify found: passthrough runs directly in bash
+        -- (bypasses all plugins, does NOT go to rtk)
         return { status = "passthrough" }
     end
 }

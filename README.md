@@ -70,7 +70,7 @@ Beyond caching, sift reduces token consumption by:
 
 Beyond optimization, sift can enforce agent behavior:
 
-- **git-commit hook**: forbids `-n`/`--no-verify` on `git commit`, returns exit code 1 with nudge explaining hooks must run. Prevents accidental hook bypass.
+- **git-commit hook**: forbids `-n`/`--no-verify` on `git commit`, returns exit code 1 with nudge explaining hooks must run. When `-n` is absent, passthrough runs the command directly in bash (bypasses all plugins).
 - **Curl JSON optimizer**: auto-detects JSON responses via `-w "%{content_type}"`, compresses with `sift.json.shortest()`, stores raw JSON for re-read. Respects `-v`/`--verbose` (full output) and `-w`/`--write-out` (passthrough). Always propagates curl exit code.
 
 ## Gain tracking
@@ -156,7 +156,7 @@ return {
 | `tail.lua` | `"tail"` | Last N lines of a file with caching |
 | `sed.lua` | `"sed"` | Line range extraction with caching |
 | `curl.lua` | `"curl"` | JSON response optimizer — detects JSON, compresses via TOON, stores raw for re-read |
-| `git-commit.lua` | `"git commit"` | Forbids `-n`/`--no-verify` on git commit, returns exit 1 + nudge |
+| `git-commit.lua` | `"git commit"` | Forbids `-n`/`--no-verify` on git commit, returns exit 1 + nudge. Passthrough runs directly in bash (not via rtk). |
 | `openspec.lua` | `"openspec"` | Injects `--json` flag, converts output via `sift.json.shortest()` |
 | `rtk.lua` | `"*"` (wildcard) | Delegates unmatched commands to `rtk` binary |
 
@@ -326,10 +326,11 @@ The `git-commit` plugin prevents accidental hook bypass:
 git commit -m "fix" -n
 # → [sift] git commit --no-verify (-n) is forbidden: hooks must run
 
-# Allowed — passthrough to rtk
+# Allowed — passthrough runs directly in bash
 git commit -m "fix"
 
-# Other git commands — passthrough to rtk
+# Other git commands — don't match "git commit" pattern,
+# fall through to wildcard (rtk.lua) or default (bash.lua)
 git status
 git push
 ```
