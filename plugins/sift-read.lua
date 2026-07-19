@@ -11,36 +11,24 @@ return {
 
     execute = function(ctx, args, stdin)
         -- Parse args: [--fresh] <path> [<offset> [<limit>]]
-        local fresh = false
-        local path
-        local raw_path
-        local offset
-        local limit
-        local arg_idx = 1
-
-        if #args >= 1 and args[1] == "--fresh" then
-            fresh = true
-            arg_idx = 2
-        end
-
-        if #args >= arg_idx then
-            path = args[arg_idx]
-            raw_path = args[arg_idx]
-            -- Strip surrounding quotes
-            path = path:match("^['\"](.*)['\"]$") or path
-            arg_idx = arg_idx + 1
-        else
+        local parsed, err = sift.args.parse(args, {
+            flags = { fresh = { "--fresh" } },
+            args = {
+                { name = "path", required = true },
+                { name = "offset", type = "int" },
+                { name = "limit", type = "int" },
+            },
+        })
+        if not parsed then
+            if err then return nil, err end
             return { status = "passthrough" }
         end
 
-        if #args >= arg_idx then
-            offset = tonumber(args[arg_idx])
-            arg_idx = arg_idx + 1
-        end
-
-        if #args >= arg_idx then
-            limit = tonumber(args[arg_idx])
-        end
+        local fresh = parsed.fresh or false
+        local path = parsed.path
+        local raw_path = path
+        local offset = parsed.offset
+        local limit = parsed.limit
 
         -- Resolve path
         if path:sub(1, 1) ~= "/" then

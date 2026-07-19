@@ -1,41 +1,19 @@
 -- tail.lua — intercept tail -n <count> <path> (priority 0)
 -- Passthrough for -c (byte count) and other flags.
 
--- Parse tail -n <count> <path> or -<count> <path>
-local function parse_tail(args)
-    local count
-    local path
-    local i = 1
-
-    while i <= #args do
-        local arg = args[i]
-        if arg == "-n" and i < #args then
-            i = i + 1
-            count = tonumber(args[i])
-        elseif arg:match("^-%d+$") then
-            count = tonumber(arg:sub(2))
-        elseif arg:sub(1, 1) == "-" and arg ~= "-n" then
-            return nil
-        elseif not path then
-            path = arg
-        end
-        i = i + 1
-    end
-
-    if not count or not path then
-        return nil
-    end
-    return { path = path, count = count }
-end
-
 return {
     name = "tail",
     priority = 0,
     pattern = "tail",
 
     execute = function(ctx, args, stdin)
-        local parsed = parse_tail(args)
+        local parsed, err = sift.args.parse(args, {
+            flags = { n = { "-n", type = "int" } },
+            args  = { { name = "path", required = true } },
+            opts  = { short_count = true, allow_unknown = false },
+        })
         if not parsed then
+            if err then return nil, err end
             return { status = "passthrough" }
         end
 
@@ -51,7 +29,7 @@ return {
 
         local hash = sift.hash.sha256(ctx, content)
         local total_lines = #sift.str.split_lines(ctx, content)
-        local range_start = math.max(1, total_lines - parsed.count + 1)
+        local range_start = math.max(1, total_lines - parsed.n + 1)
         local range_end = total_lines
 
         -- Check cache

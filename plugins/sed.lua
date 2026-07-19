@@ -2,61 +2,46 @@
 -- Only intercepts: sed -n '<start>,<end>p' <path>
 -- Passthrough for substitutions, -i, patterns, and other operations.
 
--- Parse sed -n '<start>,<end>p' <path>
--- Returns { path, start, end } or nil if not a range read
-local function parse_sed_range(args)
-    local has_n = false
-    local expr
-    local path
-    local i = 1
-
-    while i <= #args do
-        local arg = args[i]
-        if arg == "-n" then
-            has_n = true
-        elseif arg:sub(1, 1) == "-" and arg ~= "-n" then
-            -- Other flags: passthrough
-            return nil
-        elseif not expr then
-            expr = arg
-        elseif not path then
-            path = arg
-        end
-        i = i + 1
-    end
-
-    if not has_n or not expr or not path then
-        return nil
-    end
-
-    -- Strip surrounding quotes
-    expr = expr:match("^['\"](.*)['\"]$") or expr
-
-    -- Match <start>,<end>p or <start>p
-    local start, end_line = expr:match("^(%d+),(%d+)p$")
-    if start then
-        return { path = path, start = tonumber(start), end_line = tonumber(end_line) }
-    end
-    local single = expr:match("^(%d+)p$")
-    if single then
-        return { path = path, start = tonumber(single), end_line = tonumber(single) }
-    end
-
-    return nil
-end
-
 return {
     name = "sed",
     priority = 0,
     pattern = "sed",
 
     execute = function(ctx, args, stdin)
-        local range = parse_sed_range(args)
+        local parsed, err = sift.args.parse(args, {
+            flags = { n = { "-n" } },
+            args = {
+                { name = "expression", required = true },
+                { name = "path", required = true },
+            },
+            opts = { allow_unknown = false },
+        })
+        if not parsed then
+            if err then return nil, err end
+            return { status = "passthrough" }
+        end
+
+        -- Parse sed expression: <start>,<end>p or <start>p
+        local expr = parsed.expression
+        -- Strip surrounding quotes
+        expr = expr:match("^['\"](.*)['\"]$") or expr
+
+        local start, end_line = expr:match("^(%d+),(%d+)p$")
+        local range
+        if start then
+            range = { start = tonumber(start), end_line = tonumber(end_line) }
+        else
+            local single = expr:match("^(%d+)p$")
+            if single then
+                range = { start = tonumber(single), end_line = tonumber(single) }
+            end
+        end
+
         if not range then
             return { status = "passthrough" }
         end
 
-        local path = range.path
+        local path = parsed.path
         if path:sub(1, 1) ~= "/" then
             path = ctx.cwd .. "/" .. path
         end

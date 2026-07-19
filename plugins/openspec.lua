@@ -7,13 +7,16 @@ return {
 
     execute = function(ctx, args, stdin)
         -- Check if --json is already present
-        local has_json = false
-        for _, arg in ipairs(args) do
-            if arg == "--json" then
-                has_json = true
-                break
-            end
+        local parsed, err = sift.args.parse(args, {
+            flags = { json = { "--json" } },
+            opts = { allow_unknown = true },
+        })
+        if not parsed then
+            if err then return nil, err end
+            return { status = "passthrough" }
         end
+
+        local has_json = parsed.json or false
 
         -- Build command with --json injected if missing
         local parts = {ctx.command}

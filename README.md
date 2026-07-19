@@ -245,6 +245,12 @@ sift.str.split_lines(text)        → {line1, line2, ...}  (pure, no ctx)
 sift.str.slice_text(text, start, end) → string (pure, no ctx)
 sift.str.is_sensitive(path)        → boolean (pure, no ctx)
 
+sift.args.parse(args, spec)        → parsed_table | nil, err_string
+  -- Declarative argument parser. Define flags, positional args, and options.
+  -- spec: { flags={name={alias1, alias2, ..., type?}}, args={{name, required?, type?}}, opts={allow_unknown?, short_count?} }
+  -- Returns parsed table on success, or nil + error string on failure.
+  -- nil + nil means "can't handle these args" (plugin should passthrough).
+
 sift.gain.report(flags?)          → gain report string
   -- flags.verbose: true | false
   -- flags.json: true | false

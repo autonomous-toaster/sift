@@ -23,6 +23,7 @@ impl SiftLua {
         self.register_gain(&sift)?;
         self.register_meta(&sift)?;
         self.register_sift_ext(&sift)?;
+        self.register_args(&sift)?;
         self.lua.globals().set("sift", sift)?;
         Ok(())
     }

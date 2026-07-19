@@ -13,6 +13,7 @@ use mlua::Lua;
 use crate::session::SessionStore;
 
 pub(crate) mod api;
+pub(crate) mod api_reg_args;
 pub(crate) mod api_reg_cache;
 /// Extension API registration for `sift.ext.*` modules.
 pub mod api_reg_ext;

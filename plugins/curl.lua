@@ -43,17 +43,21 @@ return {
         end
 
         -- Check if -v or --verbose was explicitly requested
-        local has_verbose = false
-        local has_write_out = false
-        for _, arg in ipairs(args) do
-            if arg == "-v" or arg == "--verbose" then
-                has_verbose = true
-            elseif arg == "-w" or arg == "--write-out" then
-                has_write_out = true
-            end
+        local parsed, err = sift.args.parse(args, {
+            flags = {
+                v = { "-v" },
+                verbose = { "--verbose" },
+                w = { "-w", type = "str" },
+                ["write-out"] = { "--write-out", type = "str" },
+            },
+            opts = { allow_unknown = true },
+        })
+        if not parsed then
+            if err then return nil, err end
+            return { status = "passthrough" }
         end
 
-        if has_verbose or has_write_out then
+        if parsed.v or parsed.verbose or parsed.w or parsed["write-out"] then
             -- Agent asked for verbose or custom -w: run as-is, return full output
             local parts = { "curl" }
             for _, arg in ipairs(args) do

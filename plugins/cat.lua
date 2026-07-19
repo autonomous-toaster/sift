@@ -35,17 +35,16 @@ return {
         end
 
         -- Passthrough if flags are present or wrong number of args
-        for _, arg in ipairs(args) do
-            if arg:sub(1, 1) == "-" then
-                return { status = "passthrough" }
-            end
-        end
-
-        if #args ~= 1 then
+        local parsed, err = sift.args.parse(args, {
+            args = { { name = "path", required = true } },
+            opts = { allow_unknown = false },
+        })
+        if not parsed then
+            if err then return nil, err end
             return { status = "passthrough" }
         end
 
-        local path = args[1]
+        local path = parsed.path
         if path:sub(1, 1) ~= "/" then
             path = ctx.cwd .. "/" .. path
         end
