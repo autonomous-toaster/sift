@@ -1,0 +1,1 @@
+{"type":"config","name":"Optimize sift for fast execution, zero-copy, high throughput","metricName":"test_µs","metricUnit":"µs","bestDirection":"lower"}
