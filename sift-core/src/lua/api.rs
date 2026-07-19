@@ -312,13 +312,25 @@ impl SiftLua {
         let plugin_table: Table = self.lua.registry_value(&entry.table)?;
         let execute: Function = plugin_table.get("execute")?;
 
-        // Build context table
-        let ctx = self.lua.create_table()?;
-        ctx.set("cwd", self.ctx.cwd_str.as_str())?;
-        ctx.set("cmd_count", self.ctx.cmd_count)?;
-        ctx.set("session_id", self.session_id_str.as_str())?;
-        ctx.set("command", cmd)?;
-        ctx.set("merge_stderr", merge_stderr)?;
+        // Build context table from pre-created template, update changing fields
+        let ctx = match self.ctx_template_key.as_ref() {
+            Some(key) => {
+                let t: Table = self.lua.registry_value(key)?;
+                t.set("cmd_count", self.ctx.cmd_count)?;
+                t.set("command", cmd)?;
+                t.set("merge_stderr", merge_stderr)?;
+                t
+            }
+            None => {
+                let t = self.lua.create_table()?;
+                t.set("cwd", self.ctx.cwd_str.as_str())?;
+                t.set("session_id", self.session_id_str.as_str())?;
+                t.set("cmd_count", self.ctx.cmd_count)?;
+                t.set("command", cmd)?;
+                t.set("merge_stderr", merge_stderr)?;
+                t
+            }
+        };
 
         // Build args table (arguments only, no command name)
         let args_table = self.lua.create_table()?;

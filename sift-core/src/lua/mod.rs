@@ -41,6 +41,8 @@ pub struct SiftLua {
     recent_unchanged: Arc<Mutex<Vec<(String, u128)>>>,
     /// Cached session_id string to avoid repeated clone+unwrap.
     session_id_str: String,
+    /// Registry key for pre-created ctx table template (cwd, session_id pre-set).
+    ctx_template_key: Option<mlua::RegistryKey>,
 }
 
 /// Context passed to plugin execution.
@@ -78,7 +80,7 @@ impl SiftLua {
         let lua = Lua::new();
         let session_id_str = ctx.session_id.clone().unwrap_or_default();
 
-        let runtime = Self {
+        let mut runtime = Self {
             lua,
             plugins: Vec::new(),
             pattern_map: HashMap::new(),
@@ -87,9 +89,17 @@ impl SiftLua {
             nudges: Arc::new(Mutex::new(Vec::new())),
             recent_unchanged: Arc::new(Mutex::new(Vec::new())),
             session_id_str,
+            ctx_template_key: None,
         };
 
         runtime.register_sift_table()?;
+
+        // Pre-create ctx table template with static fields
+        let template = runtime.lua.create_table()?;
+        template.set("cwd", runtime.ctx.cwd_str.as_str())?;
+        template.set("session_id", runtime.session_id_str.as_str())?;
+        runtime.ctx_template_key = Some(runtime.lua.create_registry_value(template)?);
+
         Ok(runtime)
     }
 }
