@@ -14,14 +14,14 @@ impl SiftLua {
         let hash = self.lua.create_table()?;
         let sha256_fn = self
             .lua
-            .create_function(|_, (ctx, data): (Table, String)| {
+            .create_function(|_, (ctx, data): (Table, mlua::String)| {
                 let _ = ctx; // ctx unused, accepted for API consistency
                 Ok(hex::encode(sha2::Sha256::digest(data.as_bytes())))
             })?;
         hash.set("sha256", sha256_fn)?;
         let md5_fn = self
             .lua
-            .create_function(|_, (ctx, data): (Table, String)| {
+            .create_function(|_, (ctx, data): (Table, mlua::String)| {
                 let _ = ctx; // ctx unused, accepted for API consistency
                 Ok(hex::encode(md5::Md5::digest(data.as_bytes())))
             })?;
@@ -32,25 +32,35 @@ impl SiftLua {
 
     pub(super) fn register_fs(&self, sift: &Table) -> Result<()> {
         let fs = self.lua.create_table()?;
-        let fs_read =
-            self.lua
-                .create_function(|_, (ctx, path, opts): (Table, String, Option<Table>)| {
-                    let _ = ctx;
-                    let offset: Option<usize> = opts.as_ref().and_then(|t| t.get("offset").ok());
-                    let limit: Option<usize> = opts.as_ref().and_then(|t| t.get("limit").ok());
-                    let content = std::fs::read_to_string(&path)
-                        .map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
-                    let lines: Vec<&str> = content.lines().collect();
+        let fs_read = self.lua.create_function(
+            |lua, (ctx, path, opts): (Table, String, Option<Table>)| {
+                let _ = ctx;
+                let offset: Option<usize> = opts.as_ref().and_then(|t| t.get("offset").ok());
+                let limit: Option<usize> = opts.as_ref().and_then(|t| t.get("limit").ok());
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
+                if offset.is_some() || limit.is_some() {
+                    // Line-based slicing: find newline positions in the byte slice
+                    let lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
                     let start = offset.unwrap_or(1).saturating_sub(1);
                     let end = limit.map_or(lines.len(), |l| start + l);
-                    let selected: Vec<&str> = lines
+                    let selected: Vec<&[u8]> = lines
                         .iter()
                         .skip(start)
                         .take(end.saturating_sub(start))
                         .copied()
                         .collect();
-                    Ok(selected.join("\n"))
-                })?;
+                    let joined: Vec<u8> = selected.join(&b'\n');
+                    Ok(lua
+                        .create_string(&joined)
+                        .map_err(|e| mlua::Error::external(format!("create string: {e}")))?)
+                } else {
+                    Ok(lua
+                        .create_string(&bytes)
+                        .map_err(|e| mlua::Error::external(format!("create string: {e}")))?)
+                }
+            },
+        )?;
         fs.set("read", fs_read)?;
 
         // fs.write(path, content)
@@ -448,13 +458,8 @@ impl SiftLua {
                     tbl.set(1, String::new())?;
                     return Ok(tbl);
                 }
-                let mut i = 1;
-                for line in text.lines() {
+                for (i, line) in (1..).zip(text.lines()) {
                     tbl.set(i, line.to_string())?;
-                    i += 1;
-                }
-                if text.ends_with('\n') {
-                    tbl.set(i, String::new())?;
                 }
                 Ok(tbl)
             })?;
@@ -465,11 +470,7 @@ impl SiftLua {
         let slice_text_fn = self.lua.create_function(
             |_, (_ctx, text, start, end_): (Table, String, u64, u64)| {
                 let lines: Vec<&str> = text.lines().collect();
-                let total = if text.ends_with('\n') {
-                    lines.len() + 1
-                } else {
-                    lines.len()
-                };
+                let total = lines.len();
                 let s = (start.max(1) - 1) as usize;
                 let e = (end_.min(total as u64)) as usize;
                 if s >= total || s >= e {
@@ -543,7 +544,7 @@ impl SiftLua {
                 let path_str = path.display().to_string();
                 let _ = std::fs::write(&path, &content);
                 if let Ok(mut guard) = nudges.lock() {
-                    guard.push(format!("stored: 'command cat {path_str}'"));
+                    guard.push(format!("raw: 'command cat {path_str}'"));
                 }
                 Ok(path_str)
             },

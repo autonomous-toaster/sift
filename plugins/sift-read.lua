@@ -66,7 +66,57 @@ return {
             return { status = "handled", output = content, exit_code = 0, raw_bytes = stat.size }
         end
 
-        -- Read full file
+        -- Detect MIME type for binary document routing
+        -- Only route non-text documents to xberg
+        local mime = sift.ext.mime.detect(ctx, path)
+        local is_binary_document = not mime:match("^text/")
+
+        if is_binary_document and sift.ext.xberg ~= nil and sift.ext.xberg.is_supported(ctx, mime) then
+            -- Read raw bytes for hashing (Lua strings are binary-safe)
+            local stat = sift.fs.stat(ctx, path)
+            local raw_content = sift.fs.read(ctx, path)
+            if raw_content == nil then
+                return nil, "sift-read: " .. raw_path .. ": No such file or directory"
+            end
+
+            local hash = sift.hash.sha256(ctx, raw_content)
+
+            -- Check cache by file hash
+            if not fresh and sift.cache.has_file(ctx, hash) then
+                local display_name = path:match("([^/]+)$") or path
+                return {
+                    status = "unchanged",
+                    message = "[sift] " .. display_name .. " unchanged (cached)\n      (bypass if stale: sift-read --fresh " .. path .. ")",
+                    raw_bytes = stat.size
+                }
+            end
+
+            -- Extract text via xberg
+            local text = sift.ext.xberg.extract(ctx, path, { format = "markdown" })
+            -- Cache extracted text by file hash
+            sift.cache.store_file(ctx, hash, text)
+            sift.cache.set_path_hash(ctx, path, hash)
+
+            return {
+                status = "handled",
+                output = text,
+                exit_code = 0,
+                raw_bytes = stat.size
+            }
+        end
+
+        -- Binary document without xberg: return helpful message
+        if is_binary_document then
+            local display_name = path:match("([^/]+)$") or path
+            local msg = string.format("[sift] %s is a binary document (%s). Install sift with --features xberg to extract text automatically.\n      (fallback: command cat %s)", display_name, mime, path)
+            return {
+                status = "handled",
+                output = msg,
+                exit_code = 0
+            }
+        end
+
+        -- Read full file (text files)
         local stat = sift.fs.stat(ctx, path)
         local content = sift.fs.read(ctx, path)
         if content == nil then

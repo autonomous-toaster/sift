@@ -54,7 +54,7 @@ impl SiftLua {
                 if exit_code != 0 {
                     let path = save_output(&cmd, &session_id, cmd_count, &combined);
                     if let Ok(mut guard) = nudges.lock() {
-                        guard.push(format!("use 'command cat {path}' for raw output"));
+                        guard.push(format!("raw: 'command cat {path}'"));
                     }
                 }
                 Ok((combined, stderr, exit_code))

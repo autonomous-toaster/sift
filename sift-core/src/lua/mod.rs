@@ -14,6 +14,8 @@ use crate::session::SessionStore;
 
 pub(crate) mod api;
 pub(crate) mod api_reg_cache;
+/// Extension API registration for `sift.ext.*` modules.
+pub mod api_reg_ext;
 /// API registration functions for I/O operations (hash, fs, json, toon, jq, env, classify, diff, meta, str, store, gain).
 pub mod api_reg_io;
 pub mod exec;
