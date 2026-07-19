@@ -4,7 +4,7 @@
 //! `save_output()` for persisting raw output, and `cleanup_cache()` for
 //! pruning expired cache entries.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -77,26 +77,34 @@ pub(crate) fn exec_command(
 
     let stdout_buf_clone = Arc::clone(&stdout_buf);
     let stdout_handle = std::thread::spawn(move || {
-        let mut reader = stdout_pipe;
-        let mut chunk = [0u8; 4096];
-        let mut collected = String::new();
+        let mut reader = BufReader::with_capacity(65536, stdout_pipe);
+        let mut collected = String::with_capacity(4096);
         loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let s = String::from_utf8_lossy(&chunk[..n]).to_string();
-                    let output = transform.as_ref().map_or_else(|| s.clone(), |t| t(&s));
-                    if !silent {
-                        print!("{output}");
-                        let _ = std::io::stdout().flush();
-                    }
-                    collected.push_str(&output);
-                }
+            let buf = match reader.fill_buf() {
+                Ok(buf) => buf,
                 Err(e) => {
                     eprintln!("sift: stdout read error: {e}");
                     break;
                 }
+            };
+            if buf.is_empty() {
+                break;
             }
+            let n = buf.len();
+            if let Some(ref t) = transform {
+                let s = String::from_utf8_lossy(buf);
+                let output = t(&s);
+                if !silent {
+                    let _ = std::io::stdout().write(output.as_bytes());
+                }
+                collected.push_str(&output);
+            } else {
+                if !silent {
+                    let _ = std::io::stdout().write(buf);
+                }
+                collected.push_str(&String::from_utf8_lossy(buf));
+            }
+            reader.consume(n);
         }
         if let Ok(mut guard) = stdout_buf_clone.lock() {
             *guard = collected;
@@ -105,25 +113,26 @@ pub(crate) fn exec_command(
 
     let stderr_buf_clone = Arc::clone(&stderr_buf);
     let stderr_handle = std::thread::spawn(move || {
-        let mut reader = stderr_pipe;
-        let mut chunk = [0u8; 4096];
-        let mut collected = String::new();
+        let mut reader = BufReader::with_capacity(65536, stderr_pipe);
+        let mut collected = String::with_capacity(4096);
         loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let s = String::from_utf8_lossy(&chunk[..n]).to_string();
-                    if !silent {
-                        eprint!("{s}");
-                        let _ = std::io::stderr().flush();
-                    }
-                    collected.push_str(&s);
-                }
+            let buf = match reader.fill_buf() {
+                Ok(buf) => buf,
                 Err(e) => {
                     eprintln!("sift: stderr read error: {e}");
                     break;
                 }
+            };
+            if buf.is_empty() {
+                break;
             }
+            let n = buf.len();
+            let s = String::from_utf8_lossy(buf);
+            if !silent {
+                let _ = std::io::stderr().write(s.as_bytes());
+            }
+            collected.push_str(&s);
+            reader.consume(n);
         }
         if let Ok(mut guard) = stderr_buf_clone.lock() {
             *guard = collected;

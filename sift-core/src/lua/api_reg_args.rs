@@ -69,7 +69,13 @@ fn build_flag_map(flags: &Table) -> Result<Vec<(String, FlagEntry)>, mlua::Error
         }
 
         for alias in aliases {
-            flag_map.push((alias, FlagEntry { name: name.clone(), flag_type: flag_type.clone() }));
+            flag_map.push((
+                alias,
+                FlagEntry {
+                    name: name.clone(),
+                    flag_type: flag_type.clone(),
+                },
+            ));
         }
     }
     Ok(flag_map)
@@ -84,7 +90,11 @@ fn build_pos_specs(args_spec: &Table) -> Result<Vec<PosSpec>, mlua::Error> {
             .map_err(|_| mlua::Error::external("positional arg missing 'name'"))?;
         let required: bool = pos_tbl.get("required").unwrap_or(true);
         let pos_type: String = pos_tbl.get("type").unwrap_or_else(|_| "str".into());
-        pos_specs.push(PosSpec { name, required, pos_type });
+        pos_specs.push(PosSpec {
+            name,
+            required,
+            pos_type,
+        });
     }
     Ok(pos_specs)
 }
@@ -122,7 +132,7 @@ fn handle_value_flag(
     Ok(())
 }
 
-fn missing_value_err(lua: &Lua, alias: &str) -> ParseError {
+fn missing_value_err(_lua: &Lua, alias: &str) -> ParseError {
     ParseError::Error(format!("missing value for {alias}"))
 }
 
@@ -153,7 +163,11 @@ impl From<mlua::Error> for ParseError {
 }
 
 #[allow(clippy::too_many_lines)]
-fn parse_args(lua: &Lua, args: &Table, spec: &Table) -> std::result::Result<(Value, Value), ParseError> {
+fn parse_args(
+    lua: &Lua,
+    args: &Table,
+    spec: &Table,
+) -> std::result::Result<(Value, Value), ParseError> {
     let flags_spec: Option<Table> = spec.get("flags").ok();
     let args_spec: Option<Table> = spec.get("args").ok();
     let opts: Option<Table> = spec.get("opts").ok();
@@ -171,9 +185,10 @@ fn parse_args(lua: &Lua, args: &Table, spec: &Table) -> std::result::Result<(Val
     let pos_specs = args_spec.as_ref().map_or(Ok(Vec::new()), build_pos_specs)?;
 
     let result = lua.create_table()?;
-    let args_len: usize = args.len()?.try_into().map_err(|_| {
-        ParseError::Error("args length overflow".into())
-    })?;
+    let args_len: usize = args
+        .len()?
+        .try_into()
+        .map_err(|_| ParseError::Error("args length overflow".into()))?;
     let mut i: usize = 1;
     let mut pos_idx: usize = 0;
     let mut end_of_flags = false;
@@ -182,8 +197,7 @@ fn parse_args(lua: &Lua, args: &Table, spec: &Table) -> std::result::Result<(Val
         let arg: String = args.get(i)?;
 
         if end_of_flags {
-            set_result_or_extra(lua, &result, &pos_specs, &mut pos_idx, &arg)
-                ?;
+            set_result_or_extra(lua, &result, &pos_specs, &mut pos_idx, &arg)?;
             i += 1;
             continue;
         }
@@ -297,14 +311,12 @@ fn parse_args(lua: &Lua, args: &Table, spec: &Table) -> std::result::Result<(Val
         }
 
         // Positional argument
-        set_result_or_extra(lua, &result, &pos_specs, &mut pos_idx, &arg)
-            ?;
+        set_result_or_extra(lua, &result, &pos_specs, &mut pos_idx, &arg)?;
         i += 1;
     }
 
     // Check required positional args
-    check_required_pos(lua, &pos_specs, pos_idx)
-        ?;
+    check_required_pos(lua, &pos_specs, pos_idx)?;
 
     Ok((Value::Table(result), Value::Nil))
 }
@@ -314,21 +326,21 @@ impl SiftLua {
     pub(super) fn register_args(&self, sift: &Table) -> Result<()> {
         let args_tbl = self.lua.create_table()?;
 
-        let parse_fn = self.lua.create_function(
-            |lua: &Lua, (args, spec): (Table, Table)| -> mlua::Result<(Value, Value)> {
-                match parse_args(lua, &args, &spec) {
-                    Ok(ok) => Ok(ok),
-                    Err(ParseError::Passthrough) => Ok((Value::Nil, Value::Nil)),
-                    Err(ParseError::Error(msg)) => Ok((
-                        Value::Nil,
-                        Value::String(
-                            lua.create_string(&msg)
-                                .map_err(|e| mlua::Error::external(format!("create string: {e}")))?,
-                        ),
-                    )),
-                }
-            },
-        )?;
+        let parse_fn =
+            self.lua.create_function(
+                |lua: &Lua, (args, spec): (Table, Table)| -> mlua::Result<(Value, Value)> {
+                    match parse_args(lua, &args, &spec) {
+                        Ok(ok) => Ok(ok),
+                        Err(ParseError::Passthrough) => Ok((Value::Nil, Value::Nil)),
+                        Err(ParseError::Error(msg)) => Ok((
+                            Value::Nil,
+                            Value::String(lua.create_string(&msg).map_err(|e| {
+                                mlua::Error::external(format!("create string: {e}"))
+                            })?),
+                        )),
+                    }
+                },
+            )?;
 
         args_tbl.set("parse", parse_fn)?;
         sift.set("args", args_tbl)?;
@@ -361,7 +373,12 @@ mod tests {
         (lua, sift, lua_ref)
     }
 
-    fn parse(sift: &Table, lua: &mlua::Lua, args: Vec<&str>, spec: Table) -> (mlua::Value, mlua::Value) {
+    fn parse(
+        sift: &Table,
+        lua: &mlua::Lua,
+        args: Vec<&str>,
+        spec: Table,
+    ) -> (mlua::Value, mlua::Value) {
         let parse_fn: mlua::Function = sift.get::<Table>("args").unwrap().get("parse").unwrap();
         let args_tbl = lua.create_table().unwrap();
         for (i, a) in args.iter().enumerate() {
@@ -423,8 +440,12 @@ mod tests {
             Some(vec![("path", true, None)]),
             None,
         );
-        let (result, err): (mlua::Value, mlua::Value) = parse(&sift, &lua, vec!["--fresh", "file.rs"], s);
-        assert!(matches!(err, mlua::Value::Nil), "expected no error, got {err:?}");
+        let (result, err): (mlua::Value, mlua::Value) =
+            parse(&sift, &lua, vec!["--fresh", "file.rs"], s);
+        assert!(
+            matches!(err, mlua::Value::Nil),
+            "expected no error, got {err:?}"
+        );
         let tbl = result.as_table().unwrap();
         assert_eq!(tbl.get::<bool>("fresh").unwrap(), true);
         assert_eq!(tbl.get::<String>("path").unwrap(), "file.rs");
@@ -437,7 +458,10 @@ mod tests {
         let (result, err): (mlua::Value, mlua::Value) = parse(&sift, &lua, vec![], s);
         assert!(matches!(result, mlua::Value::Nil), "expected nil result");
         let err_str: String = err.as_str().unwrap().to_string();
-        assert!(err_str.contains("missing required argument"), "got: {err_str}");
+        assert!(
+            err_str.contains("missing required argument"),
+            "got: {err_str}"
+        );
     }
 
     #[test]
@@ -453,7 +477,8 @@ mod tests {
     fn test_parse_unknown_flag_allow() {
         let (_, sift, lua) = test_sift();
         let s = spec(&lua, None, None, Some(vec![("allow_unknown", true)]));
-        let (result, err): (mlua::Value, mlua::Value) = parse(&sift, &lua, vec!["--unknown", "val"], s);
+        let (result, err): (mlua::Value, mlua::Value) =
+            parse(&sift, &lua, vec!["--unknown", "val"], s);
         assert!(matches!(err, mlua::Value::Nil));
         let tbl = result.as_table().unwrap();
         assert_eq!(tbl.len().unwrap(), 0);
@@ -503,7 +528,8 @@ mod tests {
             Some(vec![("path", true, None)]),
             Some(vec![("short_count", true)]),
         );
-        let (result, err): (mlua::Value, mlua::Value) = parse(&sift, &lua, vec!["-10", "file.rs"], s);
+        let (result, err): (mlua::Value, mlua::Value) =
+            parse(&sift, &lua, vec!["-10", "file.rs"], s);
         assert!(matches!(err, mlua::Value::Nil));
         let tbl = result.as_table().unwrap();
         assert_eq!(tbl.get::<i64>("n").unwrap(), 10);
@@ -549,7 +575,8 @@ mod tests {
             None,
             None,
         );
-        let (result, err): (mlua::Value, mlua::Value) = parse(&sift, &lua, vec!["--output=out.md"], s);
+        let (result, err): (mlua::Value, mlua::Value) =
+            parse(&sift, &lua, vec!["--output=out.md"], s);
         assert!(matches!(err, mlua::Value::Nil));
         let tbl = result.as_table().unwrap();
         assert_eq!(tbl.get::<String>("output").unwrap(), "out.md");
@@ -564,7 +591,8 @@ mod tests {
             Some(vec![("path", true, None)]),
             None,
         );
-        let (result, err): (mlua::Value, mlua::Value) = parse(&sift, &lua, vec!["--", "--fresh"], s);
+        let (result, err): (mlua::Value, mlua::Value) =
+            parse(&sift, &lua, vec!["--", "--fresh"], s);
         assert!(matches!(err, mlua::Value::Nil));
         let tbl = result.as_table().unwrap();
         assert_eq!(tbl.get::<String>("path").unwrap(), "--fresh");
@@ -610,7 +638,12 @@ mod tests {
     #[test]
     fn test_parse_long_flag_boolean() {
         let (_, sift, lua) = test_sift();
-        let s = spec(&lua, Some(vec![("verbose", vec!["--verbose"], None)]), None, None);
+        let s = spec(
+            &lua,
+            Some(vec![("verbose", vec!["--verbose"], None)]),
+            None,
+            None,
+        );
         let (result, err): (mlua::Value, mlua::Value) = parse(&sift, &lua, vec!["--verbose"], s);
         assert!(matches!(err, mlua::Value::Nil));
         let tbl = result.as_table().unwrap();
@@ -622,7 +655,10 @@ mod tests {
         let (_, sift, lua) = test_sift();
         let s = spec(
             &lua,
-            Some(vec![("fresh", vec!["--fresh"], None), ("n", vec!["-n"], Some("int"))]),
+            Some(vec![
+                ("fresh", vec!["--fresh"], None),
+                ("n", vec!["-n"], Some("int")),
+            ]),
             Some(vec![("path", true, None)]),
             None,
         );
