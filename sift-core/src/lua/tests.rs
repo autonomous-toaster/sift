@@ -66,12 +66,12 @@ fn test_sift_str_split_lines() {
     let split_lines: mlua::Function = str_tbl.get("split_lines").unwrap();
     let ctx = lua.lua.create_table().unwrap();
 
-    // With trailing newline
+    // With trailing newline — split_lines no longer adds trailing empty string
     let result: Table = split_lines.call((ctx.clone(), "a\nb\nc\n")).unwrap();
     assert_eq!(result.get::<String>(1).unwrap(), "a");
     assert_eq!(result.get::<String>(2).unwrap(), "b");
     assert_eq!(result.get::<String>(3).unwrap(), "c");
-    assert_eq!(result.get::<String>(4).unwrap(), "");
+    assert!(result.get::<String>(4).is_err());
 
     // Without trailing newline
     let result2: Table = split_lines.call((ctx.clone(), "a\nb\nc")).unwrap();
@@ -205,14 +205,14 @@ fn test_sift_fs_read() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.txt");
     std::fs::write(&path, "hello world").unwrap();
-    let content: String = fs_read
+    let content: mlua::String = fs_read
         .call((
             test_ctx(&lua.lua),
             path.display().to_string(),
             mlua::Value::Nil,
         ))
         .unwrap();
-    assert_eq!(content, "hello world");
+    assert_eq!(content.as_bytes(), b"hello world");
 }
 
 #[test]
@@ -245,10 +245,10 @@ fn test_sift_fs_write_and_read() {
     fs_write
         .call::<()>((test_ctx(&lua.lua), path.clone(), "hello world"))
         .unwrap();
-    let content: String = fs_read
+    let content: mlua::String = fs_read
         .call((test_ctx(&lua.lua), path, mlua::Value::Nil))
         .unwrap();
-    assert_eq!(content, "hello world");
+    assert_eq!(content.as_bytes(), b"hello world");
 }
 
 #[test]

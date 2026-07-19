@@ -5,7 +5,13 @@ edition = "2021"
 description = "Core types and runtime for sift — AI-optimized shell proxy"
 
 [package.metadata.cargo-machete]
-ignored = ["md-5", "serde", "toon-format", "jaq-parse", "jaq-syn", "jaq-interpret", "futures"]
+ignored = ["md-5", "serde", "toon-format", "jaq-parse", "jaq-syn", "jaq-interpret", "futures", "xberg"]
+
+[features]
+default = []
+xberg = ["dep:xberg", "xberg/pdf", "xberg/tokio-runtime"]
+html-md = ["dep:html-to-markdown-rs"]
+mdmin = ["dep:mdmin"]
 
 [lints]
 workspace = true
@@ -17,7 +23,11 @@ dirs = { workspace = true }
 brush-parser = "0.4"
 futures = "0.3"
 hex = { workspace = true }
+html-to-markdown-rs = { version = "3", default-features = false, optional = true }
+infer = "0.22"
 md-5 = { workspace = true }
+mdmin = { git = "https://github.com/autonomous-toaster/mdmin", package = "mdmin", optional = true }
+mime_guess = "2"
 mlua = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -31,6 +41,7 @@ regex-lite = "0.1"
 similar = "2"
 shlex = "2"
 tokio = { workspace = true }
+xberg = { version = "1.0.0-rc.29", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

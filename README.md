@@ -7,8 +7,14 @@ Inspired by [pi-readcache](https://github.com/Gurpartap/pi-readcache) — a read
 ## Quick start
 
 ```bash
-# Build
+# Build with default features (no document extraction)
 cargo build --release
+
+# Build with PDF/document text extraction (xberg)
+cargo build --release --features xberg
+
+# Build with all optional features
+cargo build --release --features xberg,html-md,mdmin
 
 # Run a command (agent mode)
 ./target/release/sift -c "cat foo.rs"
@@ -19,6 +25,18 @@ AI_SESSION=my-session ./target/release/sift -c "cat foo.rs"
 # Interactive REPL
 ./target/release/sift --shell
 ```
+
+## Optional features
+
+sift uses Cargo feature flags for optional capabilities. Each feature adds new `sift.ext.*` Lua APIs that are detectable via nil check (`if sift.ext.xberg ~= nil then`).
+
+| Feature | Flag | Dependencies | What it adds |
+|---------|------|-------------|-------------|
+| Document extraction | `xberg` | xberg (pdf + tokio-runtime) | `sift.ext.xberg` — extract text from PDFs, Office docs, images, and 97+ formats. sift-read auto-detects binary documents and routes to xberg. curl auto-detects PDF/document responses. |
+| HTML conversion | `html-md` | html-to-markdown-rs | `sift.ext.html.to_markdown()` — convert HTML to Markdown. curl auto-converts HTML responses. |
+| Markdown compression | `mdmin` | mdmin (tree-sitter) | `sift.ext.markdown.compress()` — minify Markdown for token efficiency (5 levels). |
+
+Combine features: `cargo build --release --features xberg,html-md,mdmin`
 
 ## How it works
 
@@ -150,12 +168,12 @@ return {
 
 | Plugin | Pattern | Description |
 |--------|---------|-------------|
-| `sift-read.lua` | `"sift-read"` | File read with offset/limit, hash caching, unified diff on change, `--fresh` bypass |
+| `sift-read.lua` | `"sift-read"` | File read with offset/limit, hash caching, unified diff on change, `--fresh` bypass. Auto-extracts PDFs/documents via xberg when available. |
 | `cat.lua` | `"cat"` | File read caching (shares cache with sift-read) |
 | `head.lua` | `"head"` | First N lines of a file with caching |
 | `tail.lua` | `"tail"` | Last N lines of a file with caching |
 | `sed.lua` | `"sed"` | Line range extraction with caching |
-| `curl.lua` | `"curl"` | JSON response optimizer — detects JSON, compresses via TOON, stores raw for re-read |
+| `curl.lua` | `"curl"` | Response optimizer — JSON→TOON, HTML→Markdown, PDF→text. Stores raw for re-read. |
 | `git-commit.lua` | `"git commit"` | Forbids `-n`/`--no-verify` on git commit, returns exit 1 + nudge. Passthrough runs directly in bash (not via rtk). |
 | `openspec.lua` | `"openspec"` | Injects `--json` flag, converts output via `sift.json.shortest()` |
 | `rtk.lua` | `"*"` (wildcard) | Delegates unmatched commands to `rtk` binary |
@@ -239,7 +257,27 @@ sift.meta.cmd_count               -- command counter
 sift.meta.cwd                     -- working directory
 sift.meta.raw_bytes               -- raw output size (writable)
 sift.meta.filtered_bytes          -- filtered output size (computed)
+
+### `sift.ext.*` — Extension API
+
+Optional extension modules, available only when their Cargo feature is enabled. Detect availability via nil check: `if sift.ext.xberg ~= nil then`.
+
 ```
+sift.ext.mime.detect(path)              → "application/pdf" (always available)
+sift.ext.mime.detect_bytes(bytes)       → "image/png"
+sift.ext.mime.extension(mime)           → "pdf"
+
+sift.ext.xberg.extract(path, opts?)     → "extracted text"  [feature = "xberg"]
+sift.ext.xberg.extract_bytes(bytes, mime, opts?)  → "extracted text"
+sift.ext.xberg.is_supported(mime)       → true/false
+  -- opts: { format="markdown"|"plain"|"html"|"json", ocr=true/false, timeout_secs=30 }
+
+sift.ext.html.to_markdown(html, opts?)  → "markdown text"  [feature = "html-md"]
+  -- opts: { heading_style="atx"|"underlined"|"atx-closed", link_style="inline"|"reference" }
+
+sift.ext.markdown.compress(md, opts?)   → "compressed markdown"  [feature = "mdmin"]
+  -- opts: { level=0|1|2|3|4, code_blocks="preserve"|"compress-whitespace"|"compress", dictionary=true/false }
+``````
 
 ### `sift.json.shortest()` — Token-aware JSON optimization
 
@@ -272,7 +310,7 @@ Nudges are appended to plugin output as `[sift] <msg>` lines at end of dispatch.
 
 ## sift-read plugin
 
-The `sift-read` plugin provides hash-based file reading with range support and diff emission:
+The `sift-read` plugin provides hash-based file reading with range support and diff emission. When built with the `xberg` feature, it also handles binary documents:
 
 ```bash
 # First read — caches content
@@ -294,28 +332,46 @@ sift-read --fresh Cargo.toml
 sift-read Cargo.toml
 # → @@ -24,4 +24,5 @@
 # →  ...
+
+# PDF/document — auto-extracted via xberg (requires xberg feature)
+sift-read report.pdf
+# → extracted markdown content...
+
+# PDF without xberg — helpful message
+sift-read report.pdf
+# → [sift] report.pdf is a binary document (application/pdf).
+# → Install sift with --features xberg to extract text automatically.
 ```
 
 Shares cache with `cat` plugin — `cat file.txt` then `sift-read file.txt` detects "unchanged" and vice versa.
 
 ## curl plugin
 
-The `curl` plugin auto-detects JSON responses and compresses them:
+The `curl` plugin auto-detects response content types and optimizes them:
 
 ```bash
 # JSON response — compressed via TOON, raw stored for re-read
 curl https://jsonplaceholder.typicode.com/posts
 # → [100]{userId,id,title,body}: ...
 
+# HTML response — converted to Markdown (requires html-md feature)
+curl https://example.com/page
+# → markdown content...
+# → [sift] raw: 'command cat /tmp/sift/.../page.html'
+
+# PDF/document response — text extracted (requires xberg feature)
+curl https://example.com/report.pdf
+# → extracted text...
+# → [sift] raw: 'command cat /tmp/sift/.../report.pdf'
+
 # Verbose requested — full output, no compression
 curl -v https://api.example.com/data
 
 # Custom -w format — passthrough, no interference
 curl -w "\n%{http_code}" https://api.example.com/data
-
-# Non-JSON response — body returned as-is
-curl https://example.com/page.html
 ```
+
+Content-type detection uses `-w "%{content_type}"` with `-s` to suppress the progress meter. Raw responses are stored for re-read via `sift.store()`.
 
 ## git-commit plugin
 
@@ -436,7 +492,10 @@ sift/
 │   └── src/
 │       ├── lua/         # Lua VM, sift.* API, plugin dispatch
 │       │   ├── mod.rs
-│       │   └── api.rs
+│       │   ├── api.rs
+│       │   ├── api_reg_ext.rs   # sift.ext.* extension API
+│       │   ├── api_reg_io.rs    # I/O, hash, JSON, TOON
+│       │   └── api_reg_cache.rs # Cache operations
 │       ├── session.rs   # SQLite session store with token tracking
 │       └── classifier.rs  # Command classification via brush-parser
 ├── sift/                # Main binary
@@ -458,6 +517,9 @@ sift/
 - bash (at `/bin/bash`, `/usr/bin/bash`, or in PATH)
 - Optional: `jaq` CLI for `sift.jq.query()` (`cargo install jaq`)
 - Optional: `rtk` CLI for `rtk.lua` plugin delegation
+- Optional: `xberg` feature — pulls in xberg crate for PDF/document text extraction
+- Optional: `html-md` feature — pulls in html-to-markdown-rs for HTML→Markdown conversion
+- Optional: `mdmin` feature — pulls in mdmin (tree-sitter) for Markdown compression
 
 ## License
 
