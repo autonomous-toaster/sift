@@ -46,6 +46,8 @@ pub struct SiftLua {
 pub struct SiftContext {
     /// Current working directory.
     pub cwd: PathBuf,
+    /// Cached string representation of cwd.
+    pub cwd_str: String,
     /// Command counter.
     pub cmd_count: u64,
     /// Environment variables.

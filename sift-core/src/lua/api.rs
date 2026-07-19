@@ -314,7 +314,7 @@ impl SiftLua {
 
         // Build context table
         let ctx = self.lua.create_table()?;
-        ctx.set("cwd", self.ctx.cwd.display().to_string())?;
+        ctx.set("cwd", self.ctx.cwd_str.as_str())?;
         ctx.set("cmd_count", self.ctx.cmd_count)?;
         ctx.set(
             "session_id",
@@ -326,7 +326,7 @@ impl SiftLua {
         // Build args table (arguments only, no command name)
         let args_table = self.lua.create_table()?;
         for (i, arg) in args.iter().enumerate() {
-            args_table.set(i + 1, arg.clone())?;
+            args_table.set(i + 1, arg.as_str())?;
         }
 
         let stdin_val = stdin.unwrap_or(Value::Nil);

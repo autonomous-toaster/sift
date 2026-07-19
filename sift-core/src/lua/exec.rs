@@ -50,6 +50,32 @@ pub(crate) fn exec_command(
     _merge_stderr: bool,
 ) -> Result<(String, String, i32), mlua::Error> {
     let bash_path = find_real_bash();
+
+    // Fast path: no transform, use output() to avoid thread overhead
+    if transform.is_none() {
+        let output = std::process::Command::new(&bash_path)
+            .arg("-c")
+            .arg(cmd)
+            .env("PAGER", "cat")
+            .env("TERM", "dumb")
+            .env("EDITOR", "true")
+            .env("GIT_EDITOR", "true")
+            .env("GIT_PAGER", "cat")
+            .output()
+            .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
+        let stdout = String::from_utf8(output.stdout)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+        let stderr = String::from_utf8(output.stderr)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+        let exit_code = output.status.code().unwrap_or(1);
+        if !silent {
+            let _ = std::io::stdout().write(stdout.as_bytes());
+            let _ = std::io::stderr().write(stderr.as_bytes());
+        }
+        return Ok((stdout, stderr, exit_code));
+    }
+
+    // Slow path: transform provided, use threaded streaming
     let mut child = std::process::Command::new(&bash_path)
         .arg("-c")
         .arg(cmd)

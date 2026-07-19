@@ -439,7 +439,7 @@ impl SiftLua {
         let ctx = self.ctx.clone();
         meta.set("session_id", ctx.session_id.unwrap_or_default())?;
         meta.set("cmd_count", ctx.cmd_count)?;
-        meta.set("cwd", ctx.cwd.display().to_string())?;
+        meta.set("cwd", ctx.cwd.to_string_lossy().as_ref())?;
         meta.set("raw_bytes", ctx.raw_bytes)?;
         meta.set("filtered_bytes", ctx.filtered_bytes)?;
         sift.set("meta", meta)?;
