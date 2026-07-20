@@ -43,6 +43,8 @@ pub struct SiftLua {
     session_id_str: String,
     /// Registry key for pre-created ctx table template (cwd, session_id pre-set).
     ctx_template_key: Option<mlua::RegistryKey>,
+    /// Cached dispatch wrapper chunk (combines execute call + result extraction).
+    dispatch_wrapper: Option<mlua::Function>,
 }
 
 /// Context passed to plugin execution.
@@ -92,6 +94,7 @@ impl SiftLua {
             recent_unchanged: Arc::new(Mutex::new(Vec::new())),
             session_id_str,
             ctx_template_key: None,
+            dispatch_wrapper: None,
         };
 
         runtime.register_sift_table()?;
@@ -101,6 +104,14 @@ impl SiftLua {
         template.set("cwd", runtime.ctx.cwd_str.as_str())?;
         template.set("session_id", runtime.session_id_str.as_str())?;
         runtime.ctx_template_key = Some(runtime.lua.create_registry_value(template)?);
+
+        // Compile dispatch wrapper chunk (combines execute call + result extraction)
+        let wrapper: mlua::Function = runtime
+            .lua
+            .load(api::DISPATCH_WRAPPER)
+            .set_name("dispatch_wrapper")
+            .eval()?;
+        runtime.dispatch_wrapper = Some(wrapper);
 
         Ok(runtime)
     }
