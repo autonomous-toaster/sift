@@ -101,3 +101,12 @@ The hot paths are:
 ### Run 13: raw_get instead of get for result table (+11.5%)
 - Used raw_get instead of get for result table lookups (status, output, exit_code, streamed, raw_bytes)
 - **Result**: 846,200µs
+
+### Run 14: Confirmation run (+11.1%)
+- **Result**: 849,808µs — stable at ~11% improvement
+- **Confidence**: 6.6× noise floor
+
+### Bottleneck Analysis
+- SiftLua::new() avg: **95µs** (63 instances = ~6ms, only 2.3% of test time)
+- dispatch avg: **2.1µs** (<0.2% of test time)
+- **Conclusion**: Further micro-optimizations have diminishing returns. The ~11% gain is real but further improvements require architectural changes (reuse Lua VM, thread pool) that are out of scope for this session.
