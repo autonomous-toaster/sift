@@ -72,6 +72,8 @@ pub(crate) struct PluginEntry {
     priority: i32,
     /// The Lua plugin table reference.
     table: mlua::RegistryKey,
+    /// Cached execute function reference (avoids table lookup on every dispatch).
+    execute_fn: mlua::RegistryKey,
 }
 
 impl SiftLua {

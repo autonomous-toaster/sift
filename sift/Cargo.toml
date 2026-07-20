@@ -8,6 +8,11 @@ description = "AI-optimized shell proxy — Lua-plugin-based command interceptio
 name = "sift"
 path = "src/main.rs"
 
+[[bench]]
+name = "bench_throughput"
+path = "benches/bench_throughput.rs"
+harness = false
+
 [package.metadata.cargo-machete]
 ignored = ["chrono", "hex", "mlua", "sha2"]
 
