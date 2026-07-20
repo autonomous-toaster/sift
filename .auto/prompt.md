@@ -53,3 +53,51 @@ The hot paths are:
 - Key bottleneck: `exec_command` uses 4KB read chunks, threads for stdout/stderr, `String::from_utf8_lossy` per chunk, `Arc<Mutex<String>>` for collecting output
 - `dispatch` creates new Lua tables for ctx and args on every call
 - Pipeline optimization runs bash subprocess then dispatches to plugin
+
+### Run 1-3: exec_command BufReader 64KB (+10.2%)
+- Changed from 4KB raw read() to BufReader with 64KB buffer
+- Avoided redundant String::clone in no-transform path
+- Wrote bytes directly to stdout instead of print! macro
+- **Result**: 859,008µs (best so far at that point)
+
+### Run 4: HashMap plugin lookup + non-blocking record_conversation (+7.9%)
+- Added pattern_map: HashMap<String, usize> for O(1) plugin matching
+- Changed record_conversation to always spawn thread instead of block_in_place
+- **Result**: 881,106µs (slightly worse than best, within noise)
+
+### Run 5: session_id_str cache (DISCARDED)
+- Added session_id_str field to SiftLua
+- **Result**: 978,664µs — worse than baseline, reverted
+
+### Run 6: cwd_str cache + args_table as_str (+9.0%)
+- Added cwd_str: String to SiftContext to avoid repeated to_string_lossy()
+- Changed args_table.set(i+1, arg.clone()) to args_table.set(i+1, arg.as_str())
+- **Result**: 870,411µs
+
+### Run 7: session_id_str cache (retry) (+6.6%)
+- Added session_id_str to SiftLua, used in dispatch and record_conversation
+- **Result**: 893,357µs
+
+### Run 8: Re-measure (no code changes) (+8.5%)
+- **Result**: 875,146µs — stable improvement
+
+### Run 9: Pre-created ctx table template (+10.6%)
+- Created ctx table template with static fields (cwd, session_id) in SiftLua::new
+- Retrieve from registry and update only cmd_count/command/merge_stderr on dispatch
+- **Result**: 855,218µs (new best)
+
+### Run 10: parse_fd_redirects fast-path (+10.1%)
+- Added fast-path check to avoid Vec allocation when no fd redirect patterns present
+- **Result**: 859,753µs
+
+### Run 11: Nudge text push_str instead of format!() (+12.0%)
+- Used String::push_str instead of format!() for nudge text concatenation
+- **Result**: 841,890µs (new best)
+
+### Run 12: plugin_name as_str instead of cloned() (+11.8%)
+- Changed record_conversation to accept Option<&str> instead of Option<String>
+- **Result**: 843,921µs
+
+### Run 13: raw_get instead of get for result table (+11.5%)
+- Used raw_get instead of get for result table lookups (status, output, exit_code, streamed, raw_bytes)
+- **Result**: 846,200µs
