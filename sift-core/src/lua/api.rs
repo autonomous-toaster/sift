@@ -5,6 +5,19 @@ use anyhow::{Context, Result};
 use mlua::{Function, Table, Value};
 use std::io::Write;
 
+/// Lua chunk that wraps execute call + result extraction into one VM call.
+/// Reduces Lua C API calls from 3 (call + 3x raw_get) to 1.
+pub(crate) const DISPATCH_WRAPPER: &str = r#"
+    return function(execute, ctx, args, stdin)
+        local ok, plugin_result = pcall(execute, ctx, args, stdin)
+        if ok then
+            return plugin_result.status, plugin_result.output, plugin_result.exit_code or 0, plugin_result
+        else
+            return "error", tostring(plugin_result), 1, nil
+        end
+    end
+"#;
+
 impl SiftLua {
     pub(crate) fn register_sift_table(&self) -> Result<()> {
         let sift = self.lua.create_table()?;
@@ -356,11 +369,18 @@ impl SiftLua {
             guard.clear();
         }
 
-        let result: Table = execute.call((ctx, args_table, stdin_val))?;
-
-        let status: String = result.raw_get("status")?;
-        let output: String = result.raw_get("output").unwrap_or_default();
-        let exit_code: i32 = result.raw_get("exit_code").unwrap_or(0);
+        // Use dispatch wrapper: single Lua VM call instead of call + 3x raw_get
+        let (status, output, exit_code, result): (String, String, i32, Option<Table>) =
+            match self.dispatch_wrapper.as_ref() {
+                Some(wrapper) => wrapper.call((&execute, &ctx, &args_table, stdin_val))?,
+                None => {
+                    let r: Table = execute.call((ctx, args_table, stdin_val))?;
+                    let s: String = r.raw_get("status")?;
+                    let o: String = r.raw_get("output").unwrap_or_default();
+                    let ec: i32 = r.raw_get("exit_code").unwrap_or(0);
+                    (s, o, ec, Some(r))
+                }
+            };
 
         if status == "passthrough" {
             let (passthrough_output, passthrough_exit_code, _) =
@@ -381,7 +401,10 @@ impl SiftLua {
         }
 
         let final_output = if status == "unchanged" {
-            let mut msg = Self::handle_unchanged(&result);
+            let mut msg = match result.as_ref() {
+                Some(r) => Self::handle_unchanged(r),
+                None => String::new(),
+            };
 
             // Burst detection: track recent unchanged responses
             let now = std::time::SystemTime::now()
@@ -412,7 +435,9 @@ impl SiftLua {
             msg
         } else {
             // Write handled output directly to stdout (unless already streamed by plugin)
-            let streamed: bool = result.raw_get("streamed").unwrap_or(false);
+            let streamed: bool = result
+                .as_ref()
+                .map_or(false, |r| r.raw_get("streamed").unwrap_or(false));
             if !streamed && !output.is_empty() {
                 print!("{output}");
                 let _ = std::io::stdout().flush();
@@ -430,7 +455,10 @@ impl SiftLua {
         }
 
         // Extract raw_bytes from plugin result (optional)
-        let raw_bytes: Option<i64> = result.raw_get("raw_bytes").unwrap_or_default();
+        let raw_bytes: Option<i64> = result
+            .as_ref()
+            .and_then(|r| r.raw_get("raw_bytes").ok())
+            .flatten();
         let filtered_bytes = i64::try_from(final_output.len()).unwrap_or(i64::MAX);
         let plugin_name = entry.patterns.first().map(String::as_str);
         let output_format = if status == "unchanged" {
