@@ -51,13 +51,18 @@ impl SiftLua {
             .or_else(|_| plugin_table.get::<Vec<String>>("pattern"))
             .unwrap_or_else(|_| vec![plugin_name]);
 
+        // Cache the execute function to avoid table lookup on every dispatch
+        let execute: mlua::Function = plugin_table.get("execute")?;
+
         // Store the plugin table reference
         let key = self.lua.create_registry_value(plugin_table)?;
+        let execute_fn = self.lua.create_registry_value(execute)?;
 
         self.plugins.push(PluginEntry {
             patterns,
             priority,
             table: key,
+            execute_fn,
         });
 
         // Sort by: longest pattern first (use first pattern for sorting), then higher priority
@@ -308,8 +313,7 @@ impl SiftLua {
     ) -> Result<(String, i32, String)> {
         let entry = self.find_entry(cmd, args)?;
 
-        let plugin_table: Table = self.lua.registry_value(&entry.table)?;
-        let execute: Function = plugin_table.get("execute")?;
+        let execute: Function = self.lua.registry_value(&entry.execute_fn)?;
 
         // Build context table from pre-created template, update changing fields
         let ctx = match self.ctx_template_key.as_ref() {
