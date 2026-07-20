@@ -106,6 +106,18 @@ The hot paths are:
 - **Result**: 849,808µs — stable at ~11% improvement
 - **Confidence**: 6.6× noise floor
 
+### Run 15: Final confirmation (+10.7%)
+- **Result**: 854,235µs — consistent
+- **Confidence**: 7.4× noise floor
+
+### Run 16: Re-measure (+5.4%)
+- **Result**: 905,057µs — within noise range (841-905ms)
+
+### Run 17: LazyLock find_real_bash + apply_bash_env (+4.2%)
+- Cached find_real_bash with LazyLock
+- Deduplicated env var setup with apply_bash_env helper
+- **Result**: 915,843µs — within noise range
+
 ### Bottleneck Analysis
 - SiftLua::new() avg: **95µs** (63 instances = ~6ms, only 2.3% of test time)
 - dispatch avg: **2.1µs** (<0.2% of test time)
