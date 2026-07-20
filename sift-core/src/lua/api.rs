@@ -155,9 +155,17 @@ impl SiftLua {
             return Ok(result);
         }
 
-        // Normal dispatch
-        let parts = shlex::split(full_cmd)
-            .unwrap_or_else(|| full_cmd.split_whitespace().map(String::from).collect());
+        // Normal dispatch — fast path for simple commands (no quotes/escapes)
+        let has_special = full_cmd.contains('\'')
+            || full_cmd.contains('"')
+            || full_cmd.contains('\\')
+            || full_cmd.contains('$');
+        let parts: Vec<String> = if has_special {
+            shlex::split(full_cmd)
+                .unwrap_or_else(|| full_cmd.split_whitespace().map(String::from).collect())
+        } else {
+            full_cmd.split_whitespace().map(String::from).collect()
+        };
         if parts.is_empty() {
             return Ok((String::new(), 0, String::new()));
         }
