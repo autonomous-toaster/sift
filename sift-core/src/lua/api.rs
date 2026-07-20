@@ -347,9 +347,9 @@ impl SiftLua {
 
         let result: Table = execute.call((ctx, args_table, stdin_val))?;
 
-        let status: String = result.get("status")?;
-        let output: String = result.get("output").unwrap_or_default();
-        let exit_code: i32 = result.get("exit_code").unwrap_or(0);
+        let status: String = result.raw_get("status")?;
+        let output: String = result.raw_get("output").unwrap_or_default();
+        let exit_code: i32 = result.raw_get("exit_code").unwrap_or(0);
 
         if status == "passthrough" {
             let (passthrough_output, passthrough_exit_code, _) =
@@ -401,7 +401,7 @@ impl SiftLua {
             msg
         } else {
             // Write handled output directly to stdout (unless already streamed by plugin)
-            let streamed: bool = result.get::<bool>("streamed").unwrap_or(false);
+            let streamed: bool = result.raw_get("streamed").unwrap_or(false);
             if !streamed && !output.is_empty() {
                 print!("{output}");
                 let _ = std::io::stdout().flush();
@@ -419,7 +419,7 @@ impl SiftLua {
         }
 
         // Extract raw_bytes from plugin result (optional)
-        let raw_bytes: Option<i64> = result.get::<Option<i64>>("raw_bytes").unwrap_or_default();
+        let raw_bytes: Option<i64> = result.raw_get("raw_bytes").unwrap_or_default();
         let filtered_bytes = i64::try_from(final_output.len()).unwrap_or(i64::MAX);
         let plugin_name = entry.patterns.first().map(String::as_str);
         let output_format = if status == "unchanged" {
