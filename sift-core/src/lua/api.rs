@@ -1,4 +1,4 @@
-use super::exec::{exec_command, find_real_bash};
+use super::exec::{apply_bash_env, exec_command, find_real_bash};
 use super::stdin_reader::StdinReader;
 use super::{PluginEntry, SiftLua};
 use anyhow::{Context, Result};
@@ -195,11 +195,10 @@ impl SiftLua {
         // Run preceding segments in bash, pipe to plugin
         let preceding = segments[..segments.len() - 1].join(" | ");
         let bash_path = find_real_bash();
-        let output = std::process::Command::new(&bash_path)
-            .arg("-c")
-            .arg(&preceding)
-            .env("PAGER", "cat")
-            .env("TERM", "dumb")
+        let mut cmd = std::process::Command::new(&bash_path);
+        cmd.arg("-c").arg(&preceding);
+        apply_bash_env(&mut cmd);
+        let output = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()

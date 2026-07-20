@@ -6,12 +6,12 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde_json;
 
-/// Find the real bash binary, excluding our own path.
-pub(crate) fn find_real_bash() -> PathBuf {
+/// Cached real bash path, computed once.
+static REAL_BASH: LazyLock<PathBuf> = LazyLock::new(|| {
     let self_path = std::env::current_exe().ok();
     let path_var = std::env::var("PATH").unwrap_or_default();
     for dir in path_var.split(':') {
@@ -32,6 +32,27 @@ pub(crate) fn find_real_bash() -> PathBuf {
         }
     }
     PathBuf::from("/bin/bash")
+});
+
+/// Find the real bash binary, excluding our own path.
+pub(crate) fn find_real_bash() -> PathBuf {
+    REAL_BASH.clone()
+}
+
+/// Pre-configured environment variables for all bash invocations.
+const BASH_ENV_VARS: &[(&str, &str)] = &[
+    ("PAGER", "cat"),
+    ("TERM", "dumb"),
+    ("EDITOR", "true"),
+    ("GIT_EDITOR", "true"),
+    ("GIT_PAGER", "cat"),
+];
+
+/// Apply the standard bash environment to a Command.
+pub(crate) fn apply_bash_env(cmd: &mut std::process::Command) {
+    for &(key, val) in BASH_ENV_VARS {
+        cmd.env(key, val);
+    }
 }
 
 /// Transform function for streaming output: receives a chunk, returns (possibly modified) chunk.
@@ -53,14 +74,10 @@ pub(crate) fn exec_command(
 
     // Fast path: no transform, use output() to avoid thread overhead
     if transform.is_none() {
-        let output = std::process::Command::new(&bash_path)
-            .arg("-c")
-            .arg(cmd)
-            .env("PAGER", "cat")
-            .env("TERM", "dumb")
-            .env("EDITOR", "true")
-            .env("GIT_EDITOR", "true")
-            .env("GIT_PAGER", "cat")
+        let mut cmd_process = std::process::Command::new(&bash_path);
+        cmd_process.arg("-c").arg(cmd);
+        apply_bash_env(&mut cmd_process);
+        let output = cmd_process
             .output()
             .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
         let stdout = String::from_utf8(output.stdout)
@@ -76,14 +93,10 @@ pub(crate) fn exec_command(
     }
 
     // Slow path: transform provided, use threaded streaming
-    let mut child = std::process::Command::new(&bash_path)
-        .arg("-c")
-        .arg(cmd)
-        .env("PAGER", "cat")
-        .env("TERM", "dumb")
-        .env("EDITOR", "true")
-        .env("GIT_EDITOR", "true")
-        .env("GIT_PAGER", "cat")
+    let mut cmd_process = std::process::Command::new(&bash_path);
+    cmd_process.arg("-c").arg(cmd);
+    apply_bash_env(&mut cmd_process);
+    let mut child = cmd_process
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
