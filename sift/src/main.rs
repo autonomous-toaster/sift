@@ -67,6 +67,7 @@ async fn main() -> Result<()> {
 
     let ctx = SiftContext {
         cwd: session.cwd.clone(),
+        cwd_str: session.cwd.display().to_string(),
         cmd_count: 0,
         env: session.env.clone(),
         session_id: session.session_id.clone(),

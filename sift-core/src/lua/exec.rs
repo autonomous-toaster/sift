@@ -4,14 +4,14 @@
 //! `save_output()` for persisting raw output, and `cleanup_cache()` for
 //! pruning expired cache entries.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use serde_json;
 
-/// Find the real bash binary, excluding our own path.
-pub(crate) fn find_real_bash() -> PathBuf {
+/// Cached real bash path, computed once.
+static REAL_BASH: LazyLock<PathBuf> = LazyLock::new(|| {
     let self_path = std::env::current_exe().ok();
     let path_var = std::env::var("PATH").unwrap_or_default();
     for dir in path_var.split(':') {
@@ -32,6 +32,27 @@ pub(crate) fn find_real_bash() -> PathBuf {
         }
     }
     PathBuf::from("/bin/bash")
+});
+
+/// Find the real bash binary, excluding our own path.
+pub(crate) fn find_real_bash() -> PathBuf {
+    REAL_BASH.clone()
+}
+
+/// Pre-configured environment variables for all bash invocations.
+const BASH_ENV_VARS: &[(&str, &str)] = &[
+    ("PAGER", "cat"),
+    ("TERM", "dumb"),
+    ("EDITOR", "true"),
+    ("GIT_EDITOR", "true"),
+    ("GIT_PAGER", "cat"),
+];
+
+/// Apply the standard bash environment to a Command.
+pub(crate) fn apply_bash_env(cmd: &mut std::process::Command) {
+    for &(key, val) in BASH_ENV_VARS {
+        cmd.env(key, val);
+    }
 }
 
 /// Transform function for streaming output: receives a chunk, returns (possibly modified) chunk.
@@ -50,14 +71,32 @@ pub(crate) fn exec_command(
     _merge_stderr: bool,
 ) -> Result<(String, String, i32), mlua::Error> {
     let bash_path = find_real_bash();
-    let mut child = std::process::Command::new(&bash_path)
-        .arg("-c")
-        .arg(cmd)
-        .env("PAGER", "cat")
-        .env("TERM", "dumb")
-        .env("EDITOR", "true")
-        .env("GIT_EDITOR", "true")
-        .env("GIT_PAGER", "cat")
+
+    // Fast path: no transform, use output() to avoid thread overhead
+    if transform.is_none() {
+        let mut cmd_process = std::process::Command::new(&bash_path);
+        cmd_process.arg("-c").arg(cmd);
+        apply_bash_env(&mut cmd_process);
+        let output = cmd_process
+            .output()
+            .map_err(|e| mlua::Error::external(format!("spawn: {e}")))?;
+        let stdout = String::from_utf8(output.stdout)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+        let stderr = String::from_utf8(output.stderr)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
+        let exit_code = output.status.code().unwrap_or(1);
+        if !silent {
+            let _ = std::io::stdout().write(stdout.as_bytes());
+            let _ = std::io::stderr().write(stderr.as_bytes());
+        }
+        return Ok((stdout, stderr, exit_code));
+    }
+
+    // Slow path: transform provided, use threaded streaming
+    let mut cmd_process = std::process::Command::new(&bash_path);
+    cmd_process.arg("-c").arg(cmd);
+    apply_bash_env(&mut cmd_process);
+    let mut child = cmd_process
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -77,26 +116,34 @@ pub(crate) fn exec_command(
 
     let stdout_buf_clone = Arc::clone(&stdout_buf);
     let stdout_handle = std::thread::spawn(move || {
-        let mut reader = stdout_pipe;
-        let mut chunk = [0u8; 4096];
-        let mut collected = String::new();
+        let mut reader = BufReader::with_capacity(65536, stdout_pipe);
+        let mut collected = String::with_capacity(4096);
         loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let s = String::from_utf8_lossy(&chunk[..n]).to_string();
-                    let output = transform.as_ref().map_or_else(|| s.clone(), |t| t(&s));
-                    if !silent {
-                        print!("{output}");
-                        let _ = std::io::stdout().flush();
-                    }
-                    collected.push_str(&output);
-                }
+            let buf = match reader.fill_buf() {
+                Ok(buf) => buf,
                 Err(e) => {
                     eprintln!("sift: stdout read error: {e}");
                     break;
                 }
+            };
+            if buf.is_empty() {
+                break;
             }
+            let n = buf.len();
+            if let Some(ref t) = transform {
+                let s = String::from_utf8_lossy(buf);
+                let output = t(&s);
+                if !silent {
+                    let _ = std::io::stdout().write(output.as_bytes());
+                }
+                collected.push_str(&output);
+            } else {
+                if !silent {
+                    let _ = std::io::stdout().write(buf);
+                }
+                collected.push_str(&String::from_utf8_lossy(buf));
+            }
+            reader.consume(n);
         }
         if let Ok(mut guard) = stdout_buf_clone.lock() {
             *guard = collected;
@@ -105,25 +152,26 @@ pub(crate) fn exec_command(
 
     let stderr_buf_clone = Arc::clone(&stderr_buf);
     let stderr_handle = std::thread::spawn(move || {
-        let mut reader = stderr_pipe;
-        let mut chunk = [0u8; 4096];
-        let mut collected = String::new();
+        let mut reader = BufReader::with_capacity(65536, stderr_pipe);
+        let mut collected = String::with_capacity(4096);
         loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let s = String::from_utf8_lossy(&chunk[..n]).to_string();
-                    if !silent {
-                        eprint!("{s}");
-                        let _ = std::io::stderr().flush();
-                    }
-                    collected.push_str(&s);
-                }
+            let buf = match reader.fill_buf() {
+                Ok(buf) => buf,
                 Err(e) => {
                     eprintln!("sift: stderr read error: {e}");
                     break;
                 }
+            };
+            if buf.is_empty() {
+                break;
             }
+            let n = buf.len();
+            let s = String::from_utf8_lossy(buf);
+            if !silent {
+                let _ = std::io::stderr().write(s.as_bytes());
+            }
+            collected.push_str(&s);
+            reader.consume(n);
         }
         if let Ok(mut guard) = stderr_buf_clone.lock() {
             *guard = collected;

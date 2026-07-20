@@ -1,4 +1,4 @@
-use super::exec::{exec_command, find_real_bash};
+use super::exec::{apply_bash_env, exec_command, find_real_bash};
 use super::stdin_reader::StdinReader;
 use super::{PluginEntry, SiftLua};
 use anyhow::{Context, Result};
@@ -67,34 +67,49 @@ impl SiftLua {
             b_max.cmp(&a_max).then_with(|| b.priority.cmp(&a.priority))
         });
 
+        // Rebuild pattern map after sorting so indices are correct
+        self.pattern_map.clear();
+        for (i, entry) in self.plugins.iter().enumerate() {
+            for p in &entry.patterns {
+                // Only insert if this plugin has higher priority than existing match
+                let should_insert = self.pattern_map.get(p).map_or(true, |&existing_idx| {
+                    let existing = &self.plugins[existing_idx];
+                    let new_len = p.len();
+                    let existing_max = existing.patterns.iter().map(String::len).max().unwrap_or(0);
+                    entry.priority > existing.priority
+                        || (entry.priority == existing.priority && new_len > existing_max)
+                });
+                if should_insert {
+                    self.pattern_map.insert(p.clone(), i);
+                }
+            }
+        }
+
         Ok(())
     }
 
     /// Find the best matching plugin for a command.
     fn find_plugin(&self, cmd: &str, args: &[String]) -> Option<&PluginEntry> {
-        let mut candidates = vec![cmd.to_string()];
-        let mut full = cmd.to_string();
+        // Check exact cmd match first
+        if let Some(&idx) = self.pattern_map.get(cmd) {
+            return Some(&self.plugins[idx]);
+        }
+
+        // Check cmd + args combinations (longest first)
+        let mut full = String::with_capacity(
+            cmd.len() + args.iter().map(String::len).sum::<usize>() + args.len(),
+        );
+        full.push_str(cmd);
         for arg in args {
             full.push(' ');
             full.push_str(arg);
-            candidates.push(full.clone());
-        }
-
-        // Pass 1: check specific patterns only (no wildcard)
-        for candidate in candidates.iter().rev() {
-            if let Some(entry) = self
-                .plugins
-                .iter()
-                .find(|e| e.patterns.iter().any(|p| p == candidate))
-            {
-                return Some(entry);
+            if let Some(&idx) = self.pattern_map.get(&full) {
+                return Some(&self.plugins[idx]);
             }
         }
 
-        // Pass 2: fall back to wildcard plugin if no specific match
-        self.plugins
-            .iter()
-            .find(|e| e.patterns.iter().any(|p| p == "*"))
+        // Fall back to wildcard plugin
+        self.pattern_map.get("*").map(|&idx| &self.plugins[idx])
     }
 
     /// Dispatch a full command string, handling cd/pushd/popd prefixes and pipelines.
@@ -180,11 +195,10 @@ impl SiftLua {
         // Run preceding segments in bash, pipe to plugin
         let preceding = segments[..segments.len() - 1].join(" | ");
         let bash_path = find_real_bash();
-        let output = std::process::Command::new(&bash_path)
-            .arg("-c")
-            .arg(&preceding)
-            .env("PAGER", "cat")
-            .env("TERM", "dumb")
+        let mut cmd = std::process::Command::new(&bash_path);
+        cmd.arg("-c").arg(&preceding);
+        apply_bash_env(&mut cmd);
+        let output = cmd
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
@@ -297,21 +311,30 @@ impl SiftLua {
         let plugin_table: Table = self.lua.registry_value(&entry.table)?;
         let execute: Function = plugin_table.get("execute")?;
 
-        // Build context table
-        let ctx = self.lua.create_table()?;
-        ctx.set("cwd", self.ctx.cwd.display().to_string())?;
-        ctx.set("cmd_count", self.ctx.cmd_count)?;
-        ctx.set(
-            "session_id",
-            self.ctx.session_id.clone().unwrap_or_default(),
-        )?;
-        ctx.set("command", cmd)?;
-        ctx.set("merge_stderr", merge_stderr)?;
+        // Build context table from pre-created template, update changing fields
+        let ctx = match self.ctx_template_key.as_ref() {
+            Some(key) => {
+                let t: Table = self.lua.registry_value(key)?;
+                t.set("cmd_count", self.ctx.cmd_count)?;
+                t.set("command", cmd)?;
+                t.set("merge_stderr", merge_stderr)?;
+                t
+            }
+            None => {
+                let t = self.lua.create_table()?;
+                t.set("cwd", self.ctx.cwd_str.as_str())?;
+                t.set("session_id", self.session_id_str.as_str())?;
+                t.set("cmd_count", self.ctx.cmd_count)?;
+                t.set("command", cmd)?;
+                t.set("merge_stderr", merge_stderr)?;
+                t
+            }
+        };
 
         // Build args table (arguments only, no command name)
         let args_table = self.lua.create_table()?;
         for (i, arg) in args.iter().enumerate() {
-            args_table.set(i + 1, arg.clone())?;
+            args_table.set(i + 1, arg.as_str())?;
         }
 
         let stdin_val = stdin.unwrap_or(Value::Nil);
@@ -323,9 +346,9 @@ impl SiftLua {
 
         let result: Table = execute.call((ctx, args_table, stdin_val))?;
 
-        let status: String = result.get("status")?;
-        let output: String = result.get("output").unwrap_or_default();
-        let exit_code: i32 = result.get("exit_code").unwrap_or(0);
+        let status: String = result.raw_get("status")?;
+        let output: String = result.raw_get("output").unwrap_or_default();
+        let exit_code: i32 = result.raw_get("exit_code").unwrap_or(0);
 
         if status == "passthrough" {
             let (passthrough_output, passthrough_exit_code, _) =
@@ -335,8 +358,8 @@ impl SiftLua {
                 cmd,
                 Some(raw),
                 Some(raw),
-                Some("command".to_string()),
-                Some("passthrough".to_string()),
+                Some("command"),
+                Some("passthrough"),
             );
             return Ok((
                 passthrough_output,
@@ -377,7 +400,7 @@ impl SiftLua {
             msg
         } else {
             // Write handled output directly to stdout (unless already streamed by plugin)
-            let streamed: bool = result.get::<bool>("streamed").unwrap_or(false);
+            let streamed: bool = result.raw_get("streamed").unwrap_or(false);
             if !streamed && !output.is_empty() {
                 print!("{output}");
                 let _ = std::io::stdout().flush();
@@ -385,26 +408,23 @@ impl SiftLua {
             output
         };
 
+        let mut final_output = final_output;
         let nudge_text = self.collect_nudges();
         // Write nudges directly to stdout (for real-time visibility)
         if !nudge_text.is_empty() {
             print!("{nudge_text}");
             let _ = std::io::stdout().flush();
+            final_output.push_str(&nudge_text);
         }
-        let final_output = if nudge_text.is_empty() {
-            final_output
-        } else {
-            format!("{final_output}{nudge_text}")
-        };
 
         // Extract raw_bytes from plugin result (optional)
-        let raw_bytes: Option<i64> = result.get::<Option<i64>>("raw_bytes").unwrap_or_default();
+        let raw_bytes: Option<i64> = result.raw_get("raw_bytes").unwrap_or_default();
         let filtered_bytes = i64::try_from(final_output.len()).unwrap_or(i64::MAX);
-        let plugin_name = entry.patterns.first().cloned();
+        let plugin_name = entry.patterns.first().map(String::as_str);
         let output_format = if status == "unchanged" {
-            Some("unchanged".to_string())
+            Some("unchanged")
         } else {
-            Some("text".to_string())
+            Some("text")
         };
         self.record_conversation(
             cmd,
@@ -435,52 +455,47 @@ impl SiftLua {
     }
 
     /// Record a command execution into the `conversation_cache`.
+    /// Spawns a background thread to avoid blocking dispatch.
     fn record_conversation(
         &self,
         _cmd: &str,
         raw_bytes: Option<i64>,
         filtered_bytes: Option<i64>,
-        plugin_name: Option<String>,
-        output_format: Option<String>,
+        plugin_name: Option<&str>,
+        output_format: Option<&str>,
     ) {
         let Some(store) = self.store.clone() else {
             return;
         };
-        let session_id = self.ctx.session_id.clone().unwrap_or_default();
-        if session_id.is_empty() {
+        if self.session_id_str.is_empty() {
             return;
         }
-        let item_id = format!("{session_id}_{}", self.ctx.cmd_count);
+        let item_id = format!("{}_{}", self.session_id_str, self.ctx.cmd_count);
         let cmd_count = i64::try_from(self.ctx.cmd_count).unwrap_or(i64::MAX);
-        let fut = async move {
-            let _ = store
-                .record_conversation(
-                    "command_output",
-                    &item_id,
-                    None,
-                    cmd_count,
-                    raw_bytes,
-                    filtered_bytes,
-                    plugin_name,
-                    output_format,
-                )
-                .await;
-        };
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                tokio::task::block_in_place(move || {
-                    handle.block_on(fut);
-                });
-            }
-            Err(_) => {
-                std::thread::spawn(move || {
-                    let Ok(rt) = tokio::runtime::Runtime::new() else {
-                        return;
-                    };
-                    rt.block_on(fut);
-                });
-            }
-        }
+        let plugin_name = plugin_name.map(String::from);
+        let output_format = output_format.map(String::from);
+        std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                let _ = store
+                    .record_conversation(
+                        "command_output",
+                        &item_id,
+                        None,
+                        cmd_count,
+                        raw_bytes,
+                        filtered_bytes,
+                        plugin_name,
+                        output_format,
+                    )
+                    .await;
+            });
+        });
     }
 
     /// Collect accumulated nudges into a formatted string, clearing the buffer.
@@ -546,7 +561,25 @@ pub fn split_pipeline(input: &str) -> Vec<&str> {
 
 /// Parse fd redirect patterns (e.g., `2>&1`, `1>&2`) from args.
 /// Returns (`clean_args`, `merge_stderr`) where `merge_stderr` is true if `2>&1` was found.
+/// Avoids allocation when no fd redirects are present.
 fn parse_fd_redirects(args: &[String]) -> (Vec<String>, bool) {
+    // Fast path: check if any arg is a fd redirect pattern
+    let has_redirect = args.iter().any(|arg| {
+        arg == "2>&1"
+            || arg == "1>&2"
+            || (arg.len() >= 4
+                && arg
+                    .as_bytes()
+                    .iter()
+                    .all(|b| b.is_ascii_digit() || *b == b'>' || *b == b'&')
+                && arg.contains('>')
+                && arg.contains('&'))
+    });
+
+    if !has_redirect {
+        return (args.to_vec(), false);
+    }
+
     let mut clean = Vec::with_capacity(args.len());
     let mut merge_stderr = false;
     for arg in args {

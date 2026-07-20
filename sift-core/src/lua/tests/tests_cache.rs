@@ -9,6 +9,7 @@ fn test_context() -> SiftContext {
         .as_nanos();
     SiftContext {
         cwd: std::env::current_dir().unwrap(),
+        cwd_str: std::env::current_dir().unwrap().display().to_string(),
         cmd_count: 0,
         env: HashMap::new(),
         session_id: Some(format!("test-cache-{ts}")),

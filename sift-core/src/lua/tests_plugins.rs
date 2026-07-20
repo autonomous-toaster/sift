@@ -18,6 +18,7 @@ fn test_context() -> SiftContext {
         .as_nanos();
     SiftContext {
         cwd: std::env::current_dir().unwrap(),
+        cwd_str: std::env::current_dir().unwrap().display().to_string(),
         cmd_count: 0,
         env: HashMap::new(),
         session_id: Some(format!("test_plugins_{ts}")),
@@ -176,6 +177,7 @@ fn test_recording_populates_conversation_cache() {
 
     let ctx = SiftContext {
         cwd: std::env::current_dir().unwrap(),
+        cwd_str: std::env::current_dir().unwrap().display().to_string(),
         cmd_count: 1,
         env: HashMap::new(),
         session_id: Some(session_id.clone()),
@@ -237,6 +239,7 @@ fn test_passthrough_records_as_bypass() {
 
     let ctx = SiftContext {
         cwd: std::env::current_dir().unwrap(),
+        cwd_str: std::env::current_dir().unwrap().display().to_string(),
         cmd_count: 1,
         env: HashMap::new(),
         session_id: Some(session_id.clone()),
@@ -469,6 +472,7 @@ fn test_gain_report_via_lua() {
 
     let ctx = SiftContext {
         cwd: std::env::current_dir().unwrap(),
+        cwd_str: std::env::current_dir().unwrap().display().to_string(),
         cmd_count: 1,
         env: HashMap::new(),
         session_id: Some(session_id.clone()),

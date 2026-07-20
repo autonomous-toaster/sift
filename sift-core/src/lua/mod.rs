@@ -29,6 +29,8 @@ pub struct SiftLua {
     lua: Lua,
     /// Registered plugins: `(pattern, priority, plugin_table)`.
     plugins: Vec<PluginEntry>,
+    /// Pattern → plugin index lookup for O(1) matching.
+    pattern_map: HashMap<String, usize>,
     /// Session store for cache operations.
     store: Option<Arc<SessionStore>>,
     /// Current session context.
@@ -37,6 +39,10 @@ pub struct SiftLua {
     nudges: Arc<Mutex<Vec<String>>>,
     /// Recent unchanged responses for burst detection: (key, `timestamp_ms`).
     recent_unchanged: Arc<Mutex<Vec<(String, u128)>>>,
+    /// Cached session_id string to avoid repeated clone+unwrap.
+    session_id_str: String,
+    /// Registry key for pre-created ctx table template (cwd, session_id pre-set).
+    ctx_template_key: Option<mlua::RegistryKey>,
 }
 
 /// Context passed to plugin execution.
@@ -44,6 +50,8 @@ pub struct SiftLua {
 pub struct SiftContext {
     /// Current working directory.
     pub cwd: PathBuf,
+    /// Cached string representation of cwd.
+    pub cwd_str: String,
     /// Command counter.
     pub cmd_count: u64,
     /// Environment variables.
@@ -70,17 +78,28 @@ impl SiftLua {
     /// Create a new Lua runtime and register all `sift.*` API functions.
     pub fn new(store: Option<Arc<SessionStore>>, ctx: SiftContext) -> Result<Self> {
         let lua = Lua::new();
+        let session_id_str = ctx.session_id.clone().unwrap_or_default();
 
-        let runtime = Self {
+        let mut runtime = Self {
             lua,
             plugins: Vec::new(),
+            pattern_map: HashMap::new(),
             store,
             ctx,
             nudges: Arc::new(Mutex::new(Vec::new())),
             recent_unchanged: Arc::new(Mutex::new(Vec::new())),
+            session_id_str,
+            ctx_template_key: None,
         };
 
         runtime.register_sift_table()?;
+
+        // Pre-create ctx table template with static fields
+        let template = runtime.lua.create_table()?;
+        template.set("cwd", runtime.ctx.cwd_str.as_str())?;
+        template.set("session_id", runtime.session_id_str.as_str())?;
+        runtime.ctx_template_key = Some(runtime.lua.create_registry_value(template)?);
+
         Ok(runtime)
     }
 }
