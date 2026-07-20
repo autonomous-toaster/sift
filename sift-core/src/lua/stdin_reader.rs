@@ -1,79 +1,73 @@
 //! Streaming stdin reader for Lua plugins.
 //!
-//! Provides `StdinReader` — a Lua userdata that wraps `Box<dyn Read + Send>`.
+//! Provides `StdinReader` — a Lua userdata that wraps pre-loaded text content.
 //! Plugins read incrementally via `readline()`, `read(n)`, or `lines()`.
-//! Backed by `BufReader<File>` for `< file` redirects or `Cursor<String>` for piped input.
+//! Uses `Cell<usize>` for position tracking instead of `Arc<Mutex<...>>`
+//! since readers are only used within a single thread.
 
-use std::io::{BufRead, BufReader, Cursor, Read};
+use std::cell::Cell;
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 use mlua::{UserData, UserDataMethods, Value};
 
-type InnerReader = Arc<Mutex<Inner>>;
-
-enum Inner {
-    File(BufReader<std::fs::File>),
-    String(Cursor<String>),
-}
-
 /// A streaming stdin reader for Lua plugins.
 ///
-/// Wraps either a `BufReader<File>` (for `< file` redirects) or a
-/// `Cursor<String>` (for piped/string input). Uses interior mutability
-/// via `Arc<Mutex<...>>` so the reader can be shared across Lua iterator calls.
-#[derive(Clone)]
+/// Pre-loads all content during construction. Uses `Cell<usize>` for
+/// position tracking — no `Arc<Mutex<...>>` overhead since readers
+/// are only used within a single thread.
 pub struct StdinReader {
-    inner: InnerReader,
+    /// Pre-loaded content bytes.
+    data: Vec<u8>,
+    /// Current read position (byte offset).
+    pos: Cell<usize>,
 }
 
 impl StdinReader {
     /// Create a file-backed reader.
-    pub fn from_file(file: std::fs::File) -> Self {
+    pub fn from_file(mut file: std::fs::File) -> Self {
+        let mut data = Vec::new();
+        let _ = file.read_to_end(&mut data);
         Self {
-            inner: Arc::new(Mutex::new(Inner::File(BufReader::new(file)))),
+            data,
+            pos: Cell::new(0),
         }
     }
 
     /// Create a string-backed reader.
     pub fn from_string(s: String) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Inner::String(Cursor::new(s)))),
+            data: s.into_bytes(),
+            pos: Cell::new(0),
         }
     }
 
     /// Read the entire stream into a string (for backward compat).
     pub fn read_to_string(&self) -> std::io::Result<String> {
-        let Ok(mut guard) = self.inner.lock() else {
-            return Ok(String::new());
-        };
-        match &mut *guard {
-            Inner::File(r) => {
-                let mut s = String::new();
-                r.read_to_string(&mut s)?;
-                Ok(s)
-            }
-            Inner::String(r) => {
-                let mut s = String::new();
-                r.read_to_string(&mut s)?;
-                Ok(s)
-            }
-        }
+        Ok(String::from_utf8_lossy(&self.data).to_string())
     }
 
-    fn readline_inner(guard: &mut Inner) -> std::io::Result<Option<String>> {
-        let mut buf = String::new();
-        let n = match guard {
-            Inner::File(r) => r.read_line(&mut buf)?,
-            Inner::String(r) => r.read_line(&mut buf)?,
-        };
-        if n == 0 {
-            return Ok(None);
+    /// Read the next line (without trailing newline).
+    fn readline_impl(&self) -> Option<String> {
+        let pos = self.pos.get();
+        if pos >= self.data.len() {
+            return None;
         }
-        // Strip trailing newline
-        if buf.ends_with('\n') {
-            buf.pop();
+        // Find next newline
+        let remaining = &self.data[pos..];
+        let newline_pos = remaining.iter().position(|&b| b == b'\n');
+        match newline_pos {
+            Some(nl) => {
+                let line = String::from_utf8_lossy(&remaining[..nl]).to_string();
+                self.pos.set(pos + nl + 1); // skip past newline
+                Some(line)
+            }
+            None => {
+                let line = String::from_utf8_lossy(remaining).to_string();
+                self.pos.set(self.data.len());
+                Some(line)
+            }
         }
-        Ok(Some(buf))
     }
 }
 
@@ -81,68 +75,59 @@ impl UserData for StdinReader {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         // __tostring metamethod for backward compat (tostring(stdin))
         methods.add_meta_method("__tostring", |_lua, reader, ()| {
-            let Ok(mut guard) = reader.inner.lock() else {
-                return Ok(String::new());
-            };
-            match &mut *guard {
-                Inner::File(r) => {
-                    let mut s = String::new();
-                    r.read_to_string(&mut s)
-                        .map_err(|e| mlua::Error::external(format!("read: {e}")))?;
-                    Ok(s)
-                }
-                Inner::String(r) => {
-                    let mut s = String::new();
-                    r.read_to_string(&mut s)
-                        .map_err(|e| mlua::Error::external(format!("read: {e}")))?;
-                    Ok(s)
-                }
-            }
+            Ok(String::from_utf8_lossy(&reader.data).to_string())
         });
 
         // stdin:readline() -> string | nil
-        methods.add_method("readline", |lua, reader, ()| {
-            let Ok(mut guard) = reader.inner.lock() else {
-                return Ok(mlua::Value::Nil);
-            };
-            match Self::readline_inner(&mut guard) {
-                Ok(Some(line)) => Ok(Value::String(lua.create_string(&line)?)),
-                Ok(None) => Ok(Value::Nil),
-                Err(e) => Err(mlua::Error::external(format!("readline: {e}"))),
-            }
+        methods.add_method("readline", |lua, reader, ()| match reader.readline_impl() {
+            Some(line) => Ok(Value::String(lua.create_string(&line)?)),
+            None => Ok(Value::Nil),
         });
 
         // stdin:read(n) -> string | nil
         methods.add_method("read", |lua, reader, n: u64| {
             #[allow(clippy::cast_possible_truncation)]
             let n = n as usize;
-            let mut buf = vec![0u8; n];
-            let Ok(mut guard) = reader.inner.lock() else {
-                return Ok(mlua::Value::Nil);
-            };
-            let bytes_read = match &mut *guard {
-                Inner::File(r) => r.read(&mut buf)?,
-                Inner::String(r) => r.read(&mut buf)?,
-            };
-            if bytes_read == 0 {
-                return Ok(mlua::Value::Nil);
+            let pos = reader.pos.get();
+            if pos >= reader.data.len() {
+                return Ok(Value::Nil);
             }
-            buf.truncate(bytes_read);
-            let s = String::from_utf8_lossy(&buf).to_string();
-            Ok(mlua::Value::String(lua.create_string(&s)?))
+            let end = (pos + n).min(reader.data.len());
+            let chunk = &reader.data[pos..end];
+            reader.pos.set(end);
+            let s = String::from_utf8_lossy(chunk).to_string();
+            Ok(Value::String(lua.create_string(&s)?))
         });
 
         // stdin:lines() -> iterator function
         methods.add_method("lines", |lua, reader, ()| {
-            let inner = Arc::clone(&reader.inner);
+            let data = Arc::new(reader.data.clone());
+            let pos = Arc::new(Mutex::new(reader.pos.get()));
             let func = lua.create_function(move |lua, ()| {
-                let Ok(mut guard) = inner.lock() else {
-                    return Ok(Value::Nil);
+                let current = {
+                    let p = pos.lock().unwrap_or_else(|e| e.into_inner());
+                    *p
                 };
-                match Self::readline_inner(&mut guard) {
-                    Ok(Some(line)) => Ok(Value::String(lua.create_string(&line)?)),
-                    Ok(None) => Ok(Value::Nil),
-                    Err(e) => Err(mlua::Error::external(format!("readline: {e}"))),
+                if current >= data.len() {
+                    return Ok(Value::Nil);
+                }
+                let remaining = &data[current..];
+                let newline_pos = remaining.iter().position(|&b| b == b'\n');
+                match newline_pos {
+                    Some(nl) => {
+                        let line = String::from_utf8_lossy(&remaining[..nl]).to_string();
+                        if let Ok(mut p) = pos.lock() {
+                            *p = current + nl + 1;
+                        }
+                        Ok(Value::String(lua.create_string(&line)?))
+                    }
+                    None => {
+                        let line = String::from_utf8_lossy(remaining).to_string();
+                        if let Ok(mut p) = pos.lock() {
+                            *p = data.len();
+                        }
+                        Ok(Value::String(lua.create_string(&line)?))
+                    }
                 }
             })?;
             Ok(func)
