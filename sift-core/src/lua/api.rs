@@ -359,8 +359,8 @@ impl SiftLua {
                 cmd,
                 Some(raw),
                 Some(raw),
-                Some("command".to_string()),
-                Some("passthrough".to_string()),
+                Some("command"),
+                Some("passthrough"),
             );
             return Ok((
                 passthrough_output,
@@ -421,11 +421,11 @@ impl SiftLua {
         // Extract raw_bytes from plugin result (optional)
         let raw_bytes: Option<i64> = result.get::<Option<i64>>("raw_bytes").unwrap_or_default();
         let filtered_bytes = i64::try_from(final_output.len()).unwrap_or(i64::MAX);
-        let plugin_name = entry.patterns.first().cloned();
+        let plugin_name = entry.patterns.first().map(String::as_str);
         let output_format = if status == "unchanged" {
-            Some("unchanged".to_string())
+            Some("unchanged")
         } else {
-            Some("text".to_string())
+            Some("text")
         };
         self.record_conversation(
             cmd,
@@ -462,8 +462,8 @@ impl SiftLua {
         _cmd: &str,
         raw_bytes: Option<i64>,
         filtered_bytes: Option<i64>,
-        plugin_name: Option<String>,
-        output_format: Option<String>,
+        plugin_name: Option<&str>,
+        output_format: Option<&str>,
     ) {
         let Some(store) = self.store.clone() else {
             return;
@@ -473,6 +473,8 @@ impl SiftLua {
         }
         let item_id = format!("{}_{}", self.session_id_str, self.ctx.cmd_count);
         let cmd_count = i64::try_from(self.ctx.cmd_count).unwrap_or(i64::MAX);
+        let plugin_name = plugin_name.map(String::from);
+        let output_format = output_format.map(String::from);
         std::thread::spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
