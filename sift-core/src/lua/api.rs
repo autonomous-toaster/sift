@@ -409,17 +409,14 @@ impl SiftLua {
             output
         };
 
+        let mut final_output = final_output;
         let nudge_text = self.collect_nudges();
         // Write nudges directly to stdout (for real-time visibility)
         if !nudge_text.is_empty() {
             print!("{nudge_text}");
             let _ = std::io::stdout().flush();
+            final_output.push_str(&nudge_text);
         }
-        let final_output = if nudge_text.is_empty() {
-            final_output
-        } else {
-            format!("{final_output}{nudge_text}")
-        };
 
         // Extract raw_bytes from plugin result (optional)
         let raw_bytes: Option<i64> = result.get::<Option<i64>>("raw_bytes").unwrap_or_default();
