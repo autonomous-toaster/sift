@@ -17,7 +17,7 @@ return {
             opts = { allow_unknown = false },
         })
         if not parsed then
-            if err then return nil, err end
+            if err then return { status = "error", output = err } end
             return { status = "passthrough" }
         end
 
@@ -51,6 +51,7 @@ return {
             return { status = "passthrough" }
         end
 
+        local stat = sift.fs.stat(ctx, path)
         local hash = sift.hash.sha256(ctx, content)
         local total_lines = #sift.str.split_lines(ctx, content)
         local range_end = math.min(range.end_line, total_lines)
@@ -60,14 +61,16 @@ return {
             local display_name = path:match("([^/]+)$") or range.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command sed -n '%d,%dp' %s)", display_name, range.start, range_end, range.start, range_end, path)
+                message = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command sed -n '%d,%dp' %s)", display_name, range.start, range_end, range.start, range_end, path),
+                raw_bytes = stat.size
             }
         end
         if sift.cache.has_range(ctx, hash, range.start, range_end) then
             local display_name = path:match("([^/]+)$") or range.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command sed -n '%d,%dp' %s)", display_name, range.start, range_end, range.start, range_end, path)
+                message = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command sed -n '%d,%dp' %s)", display_name, range.start, range_end, range.start, range_end, path),
+                raw_bytes = stat.size
             }
         end
 
@@ -79,7 +82,8 @@ return {
         return {
             status = "handled",
             output = sliced,
-            exit_code = 0
+            exit_code = 0,
+            raw_bytes = stat.size
         }
     end
 }

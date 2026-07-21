@@ -12,7 +12,7 @@ return {
             opts = { allow_unknown = true },
         })
         if not parsed then
-            if err then return nil, err end
+            if err then return { status = "error", output = err } end
             return { status = "passthrough" }
         end
 
@@ -21,7 +21,7 @@ return {
         -- Build command with --json injected if missing
         local parts = {ctx.command}
         for i = 1, #args do
-            parts[#parts + 1] = args[i]
+            parts[#parts + 1] = sift.str.shell_quote(ctx, args[i])
         end
         if not has_json then
             parts[#parts + 1] = "--json"
@@ -33,7 +33,8 @@ return {
             return {
                 status = "handled",
                 output = output .. stderr,
-                exit_code = exit_code
+                exit_code = exit_code,
+                raw_bytes = #(output .. stderr)
             }
         end
 
@@ -42,12 +43,14 @@ return {
             json = { max_string_len = 80 },
             toon = true
         }
+        local raw_size = #output
         local optimized = sift.json.shortest(ctx, output, formats)
 
         return {
             status = "handled",
             output = optimized,
-            exit_code = 0
+            exit_code = 0,
+            raw_bytes = raw_size
         }
     end
 }

@@ -7,13 +7,18 @@ return {
     pattern = "head",
 
     execute = function(ctx, args, stdin)
+        -- Piped stdin: passthrough to bash (head handles stdin natively)
+        if stdin ~= nil then
+            return { status = "passthrough" }
+        end
+
         local parsed, err = sift.args.parse(args, {
             flags = { n = { "-n", type = "int" } },
             args  = { { name = "path", required = true } },
             opts  = { short_count = true, allow_unknown = false },
         })
         if not parsed then
-            if err then return nil, err end
+            if err then return { status = "error", output = err } end
             return { status = "passthrough" }
         end
 
@@ -27,6 +32,7 @@ return {
             return { status = "passthrough" }
         end
 
+        local stat = sift.fs.stat(ctx, path)
         local hash = sift.hash.sha256(ctx, content)
         local total_lines = #sift.str.split_lines(ctx, content)
         local range_end = math.min(parsed.n, total_lines)
@@ -36,14 +42,16 @@ return {
             local display_name = path:match("([^/]+)$") or parsed.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines 1-%d unchanged (cached)\n      (bypass if stale: command head -n %d %s)", display_name, range_end, range_end, path)
+                message = string.format("[sift] %s lines 1-%d unchanged (cached)\n      (bypass if stale: command head -n %d %s)", display_name, range_end, range_end, path),
+                raw_bytes = stat.size
             }
         end
         if sift.cache.has_range(ctx, hash, 1, range_end) then
             local display_name = path:match("([^/]+)$") or parsed.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines 1-%d unchanged (cached)\n      (bypass if stale: command head -n %d %s)", display_name, range_end, range_end, path)
+                message = string.format("[sift] %s lines 1-%d unchanged (cached)\n      (bypass if stale: command head -n %d %s)", display_name, range_end, range_end, path),
+                raw_bytes = stat.size
             }
         end
 
@@ -55,7 +63,8 @@ return {
         return {
             status = "handled",
             output = sliced,
-            exit_code = 0
+            exit_code = 0,
+            raw_bytes = stat.size
         }
     end
 }
