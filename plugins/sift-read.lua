@@ -20,7 +20,7 @@ return {
             },
         })
         if not parsed then
-            if err then return nil, err end
+            if err then return { status = "error", output = err } end
             return { status = "passthrough" }
         end
 
@@ -40,7 +40,7 @@ return {
             local stat = sift.fs.stat(ctx, path)
             local content = sift.fs.read(ctx, path)
             if content == nil then
-                return nil, "sift-read: " .. raw_path .. ": No such file or directory"
+                return { status = "error", output = "sift-read: " .. raw_path .. ": No such file or directory" }
             end
             if offset and limit then
                 local lines = sift.str.split_lines(ctx, content)
@@ -64,7 +64,7 @@ return {
             local stat = sift.fs.stat(ctx, path)
             local raw_content = sift.fs.read(ctx, path)
             if raw_content == nil then
-                return nil, "sift-read: " .. raw_path .. ": No such file or directory"
+                return { status = "error", output = "sift-read: " .. raw_path .. ": No such file or directory" }
             end
 
             local hash = sift.hash.sha256(ctx, raw_content)
@@ -81,6 +81,10 @@ return {
 
             -- Extract text via xberg
             local text = sift.ext.xberg.extract(ctx, path, { format = "markdown" })
+            -- Compress via mdmin
+            if sift.ext.markdown ~= nil then
+                text = sift.ext.markdown.compress(ctx, text, { level = 2, code_blocks = "compress", dictionary = true })
+            end
             -- Cache extracted text by file hash
             sift.cache.store_file(ctx, hash, text)
             sift.cache.set_path_hash(ctx, path, hash)
@@ -108,7 +112,12 @@ return {
         local stat = sift.fs.stat(ctx, path)
         local content = sift.fs.read(ctx, path)
         if content == nil then
-            return nil, "sift-read: " .. raw_path .. ": No such file or directory"
+            return { status = "error", output = "sift-read: " .. raw_path .. ": No such file or directory" }
+        end
+
+        -- Compress markdown files via mdmin (level 2, preserve code blocks)
+        if sift.ext.markdown ~= nil and (path:match("%.md$") or path:match("%.markdown$")) then
+            content = sift.ext.markdown.compress(ctx, content, { level = 2, code_blocks = "preserve", dictionary = true })
         end
 
         local total_lines = #sift.str.split_lines(ctx, content)

@@ -40,7 +40,7 @@ return {
             opts = { allow_unknown = false },
         })
         if not parsed then
-            if err then return nil, err end
+            if err then return { status = "error", output = err } end
             return { status = "passthrough" }
         end
 
@@ -54,7 +54,7 @@ return {
             local stat = sift.fs.stat(ctx, path)
             local content = sift.fs.read(ctx, path)
             if content == nil then
-                return nil, "cat: " .. args[1] .. ": No such file or directory"
+                return { status = "error", output = "cat: " .. args[1] .. ": No such file or directory" }
             end
             return { status = "handled", output = content, exit_code = 0, raw_bytes = stat.size }
         end
@@ -62,7 +62,12 @@ return {
         local stat = sift.fs.stat(ctx, path)
         local content = sift.fs.read(ctx, path)
         if content == nil then
-            return nil, "cat: " .. args[1] .. ": No such file or directory"
+            return { status = "error", output = "cat: " .. args[1] .. ": No such file or directory" }
+        end
+
+        -- Compress markdown files via mdmin (level 2, preserve code blocks)
+        if sift.ext.markdown ~= nil and (path:match("%.md$") or path:match("%.markdown$")) then
+            content = sift.ext.markdown.compress(ctx, content, { level = 2, code_blocks = "preserve", dictionary = true })
         end
 
         -- Compute hash for cache

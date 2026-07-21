@@ -53,7 +53,7 @@ return {
             opts = { allow_unknown = true },
         })
         if not parsed then
-            if err then return nil, err end
+            if err then return { status = "error", output = err } end
             return { status = "passthrough" }
         end
 
@@ -61,7 +61,7 @@ return {
             -- Agent asked for verbose or custom -w: run as-is, return full output
             local parts = { "curl" }
             for _, arg in ipairs(args) do
-                parts[#parts + 1] = arg
+                parts[#parts + 1] = sift.str.shell_quote(ctx, arg)
             end
             local cmd = table.concat(parts, " ")
             local output, stderr, exit_code = sift.exec(ctx, cmd)
@@ -77,7 +77,7 @@ return {
         -- Use single quotes to prevent bash from eating \n
         local new_args = { "-s", "-w", "'\\n%{content_type}'" }
         for _, arg in ipairs(args) do
-            new_args[#new_args + 1] = arg
+            new_args[#new_args + 1] = sift.str.shell_quote(ctx, arg)
         end
         local cmd = "curl " .. table.concat(new_args, " ")
         local output, stderr, exit_code = sift.exec(ctx, cmd, { silent = true })
@@ -122,15 +122,12 @@ return {
                     raw_bytes = #body
                 }
             elseif sift.ext.xberg ~= nil and sift.ext.xberg.is_supported(ctx, content_type) then
-                -- Document detected (PDF, etc.): write to temp file, extract via xberg
-                local tmp = os.tmpname()
-                local fd = io.open(tmp, "wb")
-                if fd then
-                    fd:write(body)
-                    fd:close()
+                -- Document detected (PDF, etc.): extract via xberg (no temp file)
+                local text = sift.ext.xberg.extract_bytes(ctx, body, content_type, { format = "markdown" })
+                -- Compress via mdmin
+                if sift.ext.markdown ~= nil then
+                    text = sift.ext.markdown.compress(ctx, text, { level = 2, code_blocks = "compress", dictionary = true })
                 end
-                local text = sift.ext.xberg.extract(ctx, tmp, { format = "markdown" })
-                os.remove(tmp)
                 -- Store raw document for re-read
                 local slug = slug_from_args(content_type)
                 sift.store(ctx, body, slug)
