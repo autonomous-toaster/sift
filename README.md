@@ -177,6 +177,9 @@ return {
 | `git-commit.lua` | `"git commit"` | Forbids `-n`/`--no-verify` on git commit, returns exit 1 + nudge. Passthrough runs directly in bash (not via rtk). |
 | `openspec.lua` | `"openspec"` | Injects `--json` flag, converts output via `sift.json.shortest()` |
 | `rtk.lua` | `"*"` (wildcard) | Delegates unmatched commands to `rtk` binary |
+| `cargo-machete.lua` | `"cargo machete"` | Unused dependency check — on success: `"✓ machete passed"`, on failure: unused deps list |
+| `cargo-llvm-cov.lua` | `"cargo llvm-cov"` | Coverage report — adds `--json`, extracts percentage via `sift.jq.query()`, returns `"XX.X% coverage"` |
+| `cargo-crap.lua` | `"cargo crap"` | CRAP complexity check — adds `--format json`, parses entries, filters by threshold, returns `"✓ crap passed"` or filtered list |
 
 ### `sift.*` API reference
 
@@ -493,7 +496,10 @@ sift/
 │   ├── rtk.lua
 │   ├── sed.lua
 │   ├── sift-read.lua
-│   └── tail.lua
+│   ├── tail.lua
+│   ├── cargo-machete.lua
+│   ├── cargo-llvm-cov.lua
+│   └── cargo-crap.lua
 ├── sift-core/           # Core library: Lua runtime, session store, classifier
 │   └── src/
 │       ├── lua/         # Lua VM, sift.* API, plugin dispatch
