@@ -9,7 +9,7 @@ use serde_json;
 impl SiftLua {
     pub(super) fn register_exec(&self, sift: &Table) -> Result<()> {
         let session_id = self.ctx.session_id.clone().unwrap_or_default();
-        let cmd_count = self.ctx.cmd_count;
+        let cmd_count = self.ctx.cmd_count.get();
         let nudges = self.nudges.clone();
         let lua = self.lua.clone();
         let exec_fn = self.lua.create_function(
@@ -48,6 +48,7 @@ impl SiftLua {
                     transform,
                     silent,
                     merge_stderr,
+                    None,
                 )?;
                 let combined = format!("{stdout}{stderr}");
                 // On-error save with auto-nudge

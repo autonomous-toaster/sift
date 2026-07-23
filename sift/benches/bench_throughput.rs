@@ -12,7 +12,7 @@ fn main() {
     let ctx = SiftContext {
         cwd: std::env::current_dir().unwrap(),
         cwd_str: std::env::current_dir().unwrap().display().to_string(),
-        cmd_count: 0,
+        cmd_count: std::cell::Cell::new(0),
         env: HashMap::new(),
         session_id: None,
         raw_bytes: 0,

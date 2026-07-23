@@ -6,10 +6,10 @@ return {
     pattern = "__default__",
 
     execute = function(ctx, args, stdin)
-        -- Build full command from context command + args
+        -- Build full command from context command + args, shell-quoting each arg
         local parts = {ctx.command}
         for i = 1, #args do
-            parts[#parts + 1] = args[i]
+            parts[#parts + 1] = sift.str.shell_quote(ctx, args[i])
         end
         local cmd = table.concat(parts, " ")
         local output, stderr, exit_code = sift.exec(ctx, cmd)

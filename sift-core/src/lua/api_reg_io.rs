@@ -156,7 +156,7 @@ impl SiftLua {
 
         // sift.json.shortest(ctx, raw, formats) — token-aware JSON optimization
         let session_id = self.ctx.session_id.clone().unwrap_or_default();
-        let cmd_count = self.ctx.cmd_count;
+        let cmd_count = self.ctx.cmd_count.get();
         let nudges = self.nudges.clone();
         let shortest_fn = self.lua.create_function(
             move |_lua, (ctx, raw, formats): (Table, String, Table)| {
@@ -438,7 +438,7 @@ impl SiftLua {
         let meta = self.lua.create_table()?;
         let ctx = self.ctx.clone();
         meta.set("session_id", ctx.session_id.unwrap_or_default())?;
-        meta.set("cmd_count", ctx.cmd_count)?;
+        meta.set("cmd_count", ctx.cmd_count.get())?;
         meta.set("cwd", ctx.cwd.to_string_lossy().as_ref())?;
         meta.set("raw_bytes", ctx.raw_bytes)?;
         meta.set("filtered_bytes", ctx.filtered_bytes)?;
@@ -514,13 +514,23 @@ impl SiftLua {
                 })?;
         str_tbl.set("is_sensitive", is_sensitive_fn)?;
 
+        // sift.str.shell_quote(str) -> string
+        // Shell-quote a string for safe use in bash command construction.
+        // Wraps in single quotes, escaping any embedded single quotes.
+        let shell_quote_fn =
+            self.lua
+                .create_function(|_, (_ctx, s): (Table, String)| -> mlua::Result<String> {
+                    Ok(crate::lua::api::sh_quote(&s))
+                })?;
+        str_tbl.set("shell_quote", shell_quote_fn)?;
+
         sift.set("str", str_tbl)?;
         Ok(())
     }
 
     pub(super) fn register_store(&self, sift: &Table) -> Result<()> {
         let session_id = self.ctx.session_id.clone().unwrap_or_default();
-        let cmd_count = self.ctx.cmd_count;
+        let cmd_count = self.ctx.cmd_count.get();
         let nudges = self.nudges.clone();
         let store_fn = self.lua.create_function(
             move |_, (_ctx, content, slug): (Table, String, String)| {

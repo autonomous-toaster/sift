@@ -9,7 +9,7 @@ return {
     execute = function(ctx, args, stdin)
         local parts = {ctx.command}
         for i = 1, #args do
-            parts[#parts + 1] = args[i]
+            parts[#parts + 1] = sift.str.shell_quote(ctx, args[i])
         end
         local cmd = table.concat(parts, " ")
 

@@ -19,7 +19,7 @@ return {
             opts = { allow_unknown = true },
         })
         if not parsed then
-            if err then return nil, err end
+            if err then return { status = "error", output = err } end
             return { status = "passthrough" }
         end
 

@@ -11,7 +11,10 @@ pub(crate) const DISPATCH_WRAPPER: &str = r#"
     return function(execute, ctx, args, stdin)
         local ok, plugin_result = pcall(execute, ctx, args, stdin)
         if ok then
-            return plugin_result.status, plugin_result.output, plugin_result.exit_code or 0, plugin_result
+            if plugin_result == nil then
+                return "error", "plugin returned nil", 1, nil
+            end
+            return plugin_result.status, plugin_result.output or "", plugin_result.exit_code or 0, plugin_result
         else
             return "error", tostring(plugin_result), 1, nil
         end
@@ -214,7 +217,15 @@ impl SiftLua {
         let last_name = &last_parts[0];
         let last_args: Vec<String> = last_parts[1..].to_vec();
 
-        if self.find_plugin(last_name, &last_args).is_none() {
+        let plugin = self.find_plugin(last_name, &last_args);
+        if plugin.is_none() {
+            return Ok(None);
+        }
+
+        // Skip wildcard plugins (pattern = "*") — they're fallbacks, not pipeline targets.
+        // Wildcard plugins like rtk.lua are designed for single-command delegation,
+        // not for processing piped input. Let the full pipeline run in bash instead.
+        if plugin.unwrap().patterns.first().map(String::as_str) == Some("*") {
             return Ok(None);
         }
 
@@ -340,7 +351,7 @@ impl SiftLua {
         let ctx = match self.ctx_template_key.as_ref() {
             Some(key) => {
                 let t: Table = self.lua.registry_value(key)?;
-                t.set("cmd_count", self.ctx.cmd_count)?;
+                t.set("cmd_count", self.ctx.cmd_count.get())?;
                 t.set("command", cmd)?;
                 t.set("merge_stderr", merge_stderr)?;
                 t
@@ -349,7 +360,7 @@ impl SiftLua {
                 let t = self.lua.create_table()?;
                 t.set("cwd", self.ctx.cwd_str.as_str())?;
                 t.set("session_id", self.session_id_str.as_str())?;
-                t.set("cmd_count", self.ctx.cmd_count)?;
+                t.set("cmd_count", self.ctx.cmd_count.get())?;
                 t.set("command", cmd)?;
                 t.set("merge_stderr", merge_stderr)?;
                 t
@@ -363,6 +374,15 @@ impl SiftLua {
         }
 
         let stdin_val = stdin.unwrap_or(Value::Nil);
+
+        // Pre-read stdin for passthrough case (before stdin_val is moved into wrapper.call)
+        let passthrough_stdin: Option<String> = stdin_val
+            .as_userdata()
+            .and_then(|ud| {
+                let reader = ud.borrow::<StdinReader>().ok()?;
+                reader.read_to_string().ok()
+            })
+            .or_else(|| stdin_val.as_str().map(|s| s.to_string()));
 
         // Clear nudges from previous dispatch
         if let Ok(mut guard) = self.nudges.lock() {
@@ -384,7 +404,7 @@ impl SiftLua {
 
         if status == "passthrough" {
             let (passthrough_output, passthrough_exit_code, _) =
-                Self::execute_passthrough(cmd, args)?;
+                Self::execute_passthrough(cmd, args, passthrough_stdin)?;
             let raw = i64::try_from(passthrough_output.len()).unwrap_or(i64::MAX);
             self.record_conversation(
                 cmd,
@@ -474,6 +494,9 @@ impl SiftLua {
             output_format,
         );
 
+        // Increment command counter for next dispatch
+        self.ctx.cmd_count.set(self.ctx.cmd_count.get() + 1);
+
         Ok((
             final_output,
             exit_code,
@@ -510,32 +533,50 @@ impl SiftLua {
         if self.session_id_str.is_empty() {
             return;
         }
-        let item_id = format!("{}_{}", self.session_id_str, self.ctx.cmd_count);
-        let cmd_count = i64::try_from(self.ctx.cmd_count).unwrap_or(i64::MAX);
+        let item_id = format!(
+            "{}_{}_{}",
+            self.session_id_str,
+            self.invocation_id,
+            self.ctx.cmd_count.get()
+        );
+        let cmd_count = i64::try_from(self.ctx.cmd_count.get()).unwrap_or(i64::MAX);
         let plugin_name = plugin_name.map(String::from);
         let output_format = output_format.map(String::from);
-        std::thread::spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-            rt.block_on(async move {
-                let _ = store
-                    .record_conversation(
-                        "command_output",
-                        &item_id,
-                        None,
-                        cmd_count,
-                        raw_bytes,
-                        filtered_bytes,
-                        plugin_name,
-                        output_format,
-                    )
-                    .await;
-            });
-        });
+
+        // Record synchronously: check if we're already in a tokio context
+        // (e.g. from #[tokio::main]), otherwise build a dedicated runtime.
+        // This ensures the SQLite insert completes before the process exits.
+        let record = async {
+            let _ = store
+                .record_conversation(
+                    "command_output",
+                    &item_id,
+                    None,
+                    cmd_count,
+                    raw_bytes,
+                    filtered_bytes,
+                    plugin_name,
+                    output_format,
+                )
+                .await;
+        };
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                tokio::task::block_in_place(move || {
+                    let _ = handle.block_on(record);
+                });
+            }
+            Err(_) => {
+                let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                rt.block_on(record);
+            }
+        }
     }
 
     /// Collect accumulated nudges into a formatted string, clearing the buffer.
@@ -562,14 +603,21 @@ impl SiftLua {
     }
 
     /// Execute a command directly (passthrough — bypass all plugins).
-    fn execute_passthrough(cmd: &str, args: &[String]) -> Result<(String, i32, String)> {
+    /// If `stdin` is provided, it is piped to the command's stdin.
+    fn execute_passthrough(
+        cmd: &str,
+        args: &[String],
+        stdin: Option<String>,
+    ) -> Result<(String, i32, String)> {
         let full_cmd = if args.is_empty() {
             cmd.to_string()
         } else {
-            format!("{} {}", cmd, args.join(" "))
+            let quoted: Vec<String> = args.iter().map(|a| sh_quote(a)).collect();
+            format!("{} {}", cmd, quoted.join(" "))
         };
-        // Use exec_command to execute the command directly
-        let (stdout, stderr, exit_code) = exec_command(&full_cmd, "", 0, None, false, false)?;
+        // Use exec_command to execute the command directly, forwarding stdin
+        let (stdout, stderr, exit_code) =
+            exec_command(&full_cmd, "", 0, None, false, false, stdin)?;
         let combined = format!("{stdout}{stderr}");
         Ok((combined, exit_code, "passthrough".to_string()))
     }
@@ -671,6 +719,38 @@ fn peel_pushd_prefix(input: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Shell-quote a string for safe use in bash command construction.
+/// Wraps the string in single quotes and escapes any single quotes within.
+pub(crate) fn sh_quote(s: &str) -> String {
+    if s.is_empty() {
+        return String::from("''");
+    }
+    // If the string contains no special characters and no spaces, no quoting needed
+    if !s.contains('\'')
+        && !s.contains(' ')
+        && !s.contains('\t')
+        && !s.contains('"')
+        && !s.contains('\\')
+        && !s.contains('$')
+        && !s.contains('`')
+        && !s.contains('!')
+    {
+        return s.to_string();
+    }
+    // Use single quotes, escaping embedded single quotes: 'foo'"'"'bar'
+    let mut result = String::with_capacity(s.len() + 2);
+    result.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            result.push_str("'\\''");
+        } else {
+            result.push(ch);
+        }
+    }
+    result.push('\'');
+    result
 }
 
 /// Compact a JSON value: truncate long strings, summarize large arrays, limit depth/keys.

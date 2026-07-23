@@ -41,6 +41,8 @@ pub struct SiftLua {
     recent_unchanged: Arc<Mutex<Vec<(String, u128)>>>,
     /// Cached session_id string to avoid repeated clone+unwrap.
     session_id_str: String,
+    /// Unique invocation ID (per-process) to disambiguate item_ids across sift -c invocations.
+    invocation_id: String,
     /// Registry key for pre-created ctx table template (cwd, session_id pre-set).
     ctx_template_key: Option<mlua::RegistryKey>,
     /// Cached dispatch wrapper chunk (combines execute call + result extraction).
@@ -55,7 +57,7 @@ pub struct SiftContext {
     /// Cached string representation of cwd.
     pub cwd_str: String,
     /// Command counter.
-    pub cmd_count: u64,
+    pub cmd_count: std::cell::Cell<u64>,
     /// Environment variables.
     pub env: HashMap<String, String>,
     /// Session identifier.
@@ -83,6 +85,11 @@ impl SiftLua {
     pub fn new(store: Option<Arc<SessionStore>>, ctx: SiftContext) -> Result<Self> {
         let lua = Lua::new();
         let session_id_str = ctx.session_id.clone().unwrap_or_default();
+        let invocation_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_string();
 
         let mut runtime = Self {
             lua,
@@ -93,6 +100,7 @@ impl SiftLua {
             nudges: Arc::new(Mutex::new(Vec::new())),
             recent_unchanged: Arc::new(Mutex::new(Vec::new())),
             session_id_str,
+            invocation_id,
             ctx_template_key: None,
             dispatch_wrapper: None,
         };

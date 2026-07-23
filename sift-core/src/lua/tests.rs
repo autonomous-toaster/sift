@@ -7,7 +7,7 @@ fn test_context() -> SiftContext {
     SiftContext {
         cwd: std::env::current_dir().unwrap(),
         cwd_str: std::env::current_dir().unwrap().display().to_string(),
-        cmd_count: 0,
+        cmd_count: std::cell::Cell::new(0),
         env: HashMap::new(),
         session_id: None,
         raw_bytes: 0,
@@ -419,7 +419,7 @@ fn test_sift_meta() {
     let ctx = SiftContext {
         cwd: std::env::current_dir().unwrap(),
         cwd_str: std::env::current_dir().unwrap().display().to_string(),
-        cmd_count: 42,
+        cmd_count: std::cell::Cell::new(42),
         env: HashMap::new(),
         session_id: Some("test-session".to_string()),
         raw_bytes: 100,
@@ -436,7 +436,8 @@ fn test_sift_meta() {
 
 #[test]
 fn test_exec_command() {
-    let (stdout, stderr, code) = exec_command("echo hello", "test", 0, None, false, false).unwrap();
+    let (stdout, stderr, code) =
+        exec_command("echo hello", "test", 0, None, false, false, None).unwrap();
     assert!(
         stdout.contains("hello"),
         "stdout should contain hello, got: {stdout}"
@@ -447,8 +448,16 @@ fn test_exec_command() {
 
 #[test]
 fn test_exec_command_with_stderr() {
-    let (stdout, stderr, code) =
-        exec_command("echo out && echo err >&2", "test", 0, None, false, false).unwrap();
+    let (stdout, stderr, code) = exec_command(
+        "echo out && echo err >&2",
+        "test",
+        0,
+        None,
+        false,
+        false,
+        None,
+    )
+    .unwrap();
     assert!(
         stdout.contains("out"),
         "stdout should contain out, got: {stdout}"
@@ -462,7 +471,8 @@ fn test_exec_command_with_stderr() {
 
 #[test]
 fn test_exec_command_exit_code() {
-    let (_stdout, _stderr, code) = exec_command("exit 42", "test", 0, None, false, false).unwrap();
+    let (_stdout, _stderr, code) =
+        exec_command("exit 42", "test", 0, None, false, false, None).unwrap();
     assert_eq!(code, 42, "exit code should be 42, got {code}");
 }
 
@@ -676,6 +686,144 @@ fn test_stdin_reader_pipeline() {
         .unwrap();
     assert_eq!(exit_code, 0, "output: {output}");
     assert!(output.contains("HELLO"), "output: {output}");
+}
+
+#[test]
+fn test_pipeline_skips_wildcard_plugin() {
+    // Pipeline with wildcard-matched command (sort) should run full pipeline in bash
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    let wildcard_code = r#"
+        return {
+            name = "wildcard",
+            priority = 0,
+            pattern = "*",
+            execute = function(ctx, args, stdin)
+                return { status = "passthrough" }
+            end
+        }
+    "#;
+    lua.load_plugin_from_str("wildcard", wildcard_code).unwrap();
+    // "echo abc | sort" should produce "abc" (sort with stdin from echo)
+    let (output, exit_code, _plugin) = lua
+        .dispatch_full("echo abc | sort", None::<mlua::Value>)
+        .unwrap();
+    assert_eq!(
+        output.trim(),
+        "abc",
+        "wildcard pipeline should produce sorted echo output"
+    );
+    assert_eq!(exit_code, 0);
+}
+
+#[test]
+fn test_pipeline_triggers_for_specific_plugin() {
+    // Pipeline with specific plugin match (cat) should still trigger optimization
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    let cat_code = r#"
+        return {
+            name = "test-cat",
+            priority = 0,
+            pattern = "test-cat",
+            execute = function(ctx, args, stdin)
+                -- Read stdin to verify pipeline optimization passed it through
+                local input = ""
+                if stdin ~= nil then
+                    input = tostring(stdin)
+                end
+                return { status = "handled", output = "cat:" .. input, exit_code = 0 }
+            end
+        }
+    "#;
+    lua.load_plugin_from_str("test-cat", cat_code).unwrap();
+    let (output, exit_code, _plugin) = lua
+        .dispatch_full("echo hello | test-cat", None::<mlua::Value>)
+        .unwrap();
+    assert!(
+        output.contains("hello"),
+        "specific plugin pipeline should receive stdin, got: {output}"
+    );
+    assert_eq!(exit_code, 0);
+}
+
+#[test]
+fn test_passthrough_with_stdin() {
+    // Passthrough with piped input should forward stdin to the command
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    // Load default plugin so unmatched commands fall through
+    let default_code = r#"
+        return {
+            name = "__default__",
+            priority = -1000,
+            pattern = "__default__",
+            execute = function(ctx, args, stdin)
+                return { status = "handled", output = "fallback", exit_code = 0 }
+            end
+        }
+    "#;
+    lua.load_plugin_from_str("default", default_code).unwrap();
+    // Plugin that matches "tr" (a real command) and returns passthrough
+    let passthrough_plugin = r#"
+        return {
+            name = "tr",
+            priority = 0,
+            pattern = "tr",
+            execute = function(ctx, args, stdin)
+                return { status = "passthrough" }
+            end
+        }
+    "#;
+    lua.load_plugin_from_str("tr", passthrough_plugin).unwrap();
+    // "echo abc | tr a-z A-Z" should produce "ABC" (tr with stdin from echo)
+    let (output, exit_code, _plugin) = lua
+        .dispatch_full("echo abc | tr a-z A-Z", None::<mlua::Value>)
+        .unwrap();
+    assert_eq!(
+        output.trim(),
+        "ABC",
+        "passthrough with stdin should forward piped input"
+    );
+    assert_eq!(exit_code, 0);
+}
+
+#[test]
+fn test_passthrough_without_stdin() {
+    // Passthrough without stdin (non-pipeline mode) should behave as before
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    // Load default plugin so unmatched commands fall through
+    let default_code = r#"
+        return {
+            name = "__default__",
+            priority = -1000,
+            pattern = "__default__",
+            execute = function(ctx, args, stdin)
+                return { status = "handled", output = "fallback", exit_code = 0 }
+            end
+        }
+    "#;
+    lua.load_plugin_from_str("default", default_code).unwrap();
+    // Plugin that matches "echo" and returns passthrough
+    let passthrough_plugin = r#"
+        return {
+            name = "echo",
+            priority = 0,
+            pattern = "echo",
+            execute = function(ctx, args, stdin)
+                return { status = "passthrough" }
+            end
+        }
+    "#;
+    lua.load_plugin_from_str("echo", passthrough_plugin)
+        .unwrap();
+    // Direct command (no pipeline) should work normally
+    let (output, exit_code, _plugin) = lua
+        .dispatch_full("echo direct", None::<mlua::Value>)
+        .unwrap();
+    assert_eq!(
+        output.trim(),
+        "direct",
+        "passthrough without stdin should work normally"
+    );
+    assert_eq!(exit_code, 0);
 }
 
 mod tests_cache;

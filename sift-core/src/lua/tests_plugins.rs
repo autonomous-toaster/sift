@@ -19,7 +19,7 @@ fn test_context() -> SiftContext {
     SiftContext {
         cwd: std::env::current_dir().unwrap(),
         cwd_str: std::env::current_dir().unwrap().display().to_string(),
-        cmd_count: 0,
+        cmd_count: std::cell::Cell::new(0),
         env: HashMap::new(),
         session_id: Some(format!("test_plugins_{ts}")),
         raw_bytes: 0,
@@ -178,7 +178,7 @@ fn test_recording_populates_conversation_cache() {
     let ctx = SiftContext {
         cwd: std::env::current_dir().unwrap(),
         cwd_str: std::env::current_dir().unwrap().display().to_string(),
-        cmd_count: 1,
+        cmd_count: std::cell::Cell::new(1),
         env: HashMap::new(),
         session_id: Some(session_id.clone()),
         raw_bytes: 0,
@@ -201,12 +201,15 @@ fn test_recording_populates_conversation_cache() {
     // Give record_conversation thread time to flush
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let item_id = format!("{session_id}_1");
-    let entry = rt
-        .block_on(store.get_conversation("command_output", &item_id))
+    // Query with LIKE since item_id now includes invocation_id
+    let entries = rt
+        .block_on(store.query_conversations(Some(&session_id)))
         .unwrap();
-    assert!(entry.is_some(), "conversation_cache should have an entry");
-    let entry = entry.unwrap();
+    assert!(
+        !entries.is_empty(),
+        "conversation_cache should have an entry"
+    );
+    let entry = &entries[0];
     assert_eq!(entry.plugin_name.as_deref(), Some("cat"));
     assert_eq!(entry.output_format.as_deref(), Some("text"));
     assert!(entry.raw_bytes.is_some(), "raw_bytes should be recorded");
@@ -240,7 +243,7 @@ fn test_passthrough_records_as_bypass() {
     let ctx = SiftContext {
         cwd: std::env::current_dir().unwrap(),
         cwd_str: std::env::current_dir().unwrap().display().to_string(),
-        cmd_count: 1,
+        cmd_count: std::cell::Cell::new(1),
         env: HashMap::new(),
         session_id: Some(session_id.clone()),
         raw_bytes: 0,
@@ -272,12 +275,15 @@ return {
 
     std::thread::sleep(std::time::Duration::from_millis(200));
 
-    let item_id = format!("{session_id}_1");
-    let entry = rt
-        .block_on(store.get_conversation("command_output", &item_id))
+    // Query with LIKE since item_id now includes invocation_id
+    let entries = rt
+        .block_on(store.query_conversations(Some(&session_id)))
         .unwrap();
-    assert!(entry.is_some(), "bypass should have a conversation entry");
-    let entry = entry.unwrap();
+    assert!(
+        !entries.is_empty(),
+        "bypass should have a conversation entry"
+    );
+    let entry = &entries[0];
     assert_eq!(entry.plugin_name.as_deref(), Some("command"));
     assert_eq!(entry.output_format.as_deref(), Some("passthrough"));
     assert!(
@@ -473,7 +479,7 @@ fn test_gain_report_via_lua() {
     let ctx = SiftContext {
         cwd: std::env::current_dir().unwrap(),
         cwd_str: std::env::current_dir().unwrap().display().to_string(),
-        cmd_count: 1,
+        cmd_count: std::cell::Cell::new(1),
         env: HashMap::new(),
         session_id: Some(session_id.clone()),
         raw_bytes: 0,
