@@ -31,6 +31,7 @@ sift-core = { path = "../sift-core" }
 tokio = { workspace = true, features = ["process", "io-util"] }
 
 [features]
+default = ["html-md", "xberg", "mdmin"]
 html-md = ["sift-core/html-md"]
 xberg = ["sift-core/xberg"]
 mdmin = ["sift-core/mdmin"]
