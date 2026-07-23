@@ -144,7 +144,8 @@ return {
         return {
             status = "handled",
             output = body or output,
-            exit_code = exit_code
+            exit_code = exit_code,
+            raw_bytes = #(body or output)
         }
     end
 }
