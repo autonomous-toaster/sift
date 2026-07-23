@@ -645,6 +645,9 @@ pub struct GainReport {
     total_filtered_bytes: i64,
     reduction_bps: i64,
     bypass_count: i64,
+    session_count: Option<i64>,
+    first_seen: Option<i64>,
+    last_seen: Option<i64>,
     per_plugin: Vec<PluginGain>,
     commands: Option<Vec<CommandEntry>>,
 }
@@ -685,6 +688,9 @@ pub async fn generate_gain_report(
     let mut plugin_map: std::collections::HashMap<String, (i64, i64, i64)> =
         std::collections::HashMap::new();
     let mut command_list = Vec::new();
+    let mut session_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut first_seen: Option<i64> = None;
+    let mut last_seen: Option<i64> = None;
 
     for entry in &entries {
         let plugin = entry
@@ -694,6 +700,19 @@ pub async fn generate_gain_report(
         let is_bypass = entry.output_format.as_deref() == Some("passthrough");
         let raw = entry.raw_bytes.unwrap_or(0);
         let filtered = entry.filtered_bytes.unwrap_or(0);
+
+        // Track unique session IDs from item_id prefix (before first _)
+        if let Some(underscore) = entry.item_id.find('_') {
+            session_set.insert(entry.item_id[..underscore].to_string());
+        }
+
+        // Track date range
+        if entry.first_shown > 0 {
+            first_seen = Some(first_seen.map_or(entry.first_shown, |min| min.min(entry.first_shown)));
+        }
+        if entry.last_shown > 0 {
+            last_seen = Some(last_seen.map_or(entry.last_shown, |max| max.max(entry.last_shown)));
+        }
 
         total_commands += 1;
         total_raw_bytes += raw;
@@ -755,6 +774,13 @@ pub async fn generate_gain_report(
         total_filtered_bytes,
         reduction_bps,
         bypass_count,
+        session_count: if session_id.is_none() {
+            Some(session_set.len() as i64)
+        } else {
+            None
+        },
+        first_seen,
+        last_seen,
         per_plugin,
         commands: if flags.verbose {
             Some(command_list)
@@ -762,6 +788,14 @@ pub async fn generate_gain_report(
             None
         },
     })
+}
+
+/// Convert a unix-ms timestamp to a YYYY-MM-DD date string.
+fn timestamp_to_date(ts_ms: i64) -> Option<String> {
+    let secs = ts_ms / 1000;
+    let nanos = (ts_ms % 1000) as u32 * 1_000_000;
+    let dt = chrono::DateTime::from_timestamp(secs, nanos)?;
+    Some(dt.format("%Y-%m-%d").to_string())
 }
 
 /// Format a gain report as a human-readable string.
@@ -773,19 +807,36 @@ pub fn format_gain_report(report: &GainReport, session_id: Option<&str>) -> Stri
     let mut out = String::new();
     let _ = writeln!(out, "sift gain");
     let _ = writeln!(out, "─────────────────────────────────────");
-    let _ = writeln!(out, "  Commands:    {}", report.total_commands);
+    // Commands line with optional session count
+    if let Some(sc) = report.session_count {
+        let _ = writeln!(out, "  Commands:    {}  (across {} sessions)", report.total_commands, sc);
+    } else {
+        let _ = writeln!(out, "  Commands:    {}", report.total_commands);
+    }
     let _ = writeln!(out, "  Raw:         {} KB", report.total_raw_bytes / 1024);
     let _ = writeln!(
         out,
         "  Filtered:    {} KB",
         report.total_filtered_bytes / 1024
     );
+    // Reduction line with absolute savings
+    let saved_kb = (report.total_raw_bytes.saturating_sub(report.total_filtered_bytes)) / 1024;
     let _ = writeln!(
         out,
-        "  Reduction:   {:.1}% ({} bps)",
-        reduction_pct, report.reduction_bps
+        "  Reduction:   {:.1}% ({} bps, {} KB saved)",
+        reduction_pct, report.reduction_bps, saved_kb
     );
     let _ = writeln!(out, "  Bypasses:    {}", report.bypass_count);
+    // Date range line
+    if let (Some(first), Some(last)) = (report.first_seen, report.last_seen) {
+        if let (Some(f_dt), Some(l_dt)) = (timestamp_to_date(first), timestamp_to_date(last)) {
+            if f_dt == l_dt {
+                let _ = writeln!(out, "  Period:      {}", f_dt);
+            } else {
+                let _ = writeln!(out, "  Period:      {} – {}", f_dt, l_dt);
+            }
+        }
+    }
     let _ = writeln!(out, "  ─────────────────────────────────────");
     let _ = writeln!(out, "  Per plugin:");
     for p in &report.per_plugin {
