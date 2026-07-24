@@ -708,7 +708,8 @@ pub async fn generate_gain_report(
 
         // Track date range
         if entry.first_shown > 0 {
-            first_seen = Some(first_seen.map_or(entry.first_shown, |min| min.min(entry.first_shown)));
+            first_seen =
+                Some(first_seen.map_or(entry.first_shown, |min| min.min(entry.first_shown)));
         }
         if entry.last_shown > 0 {
             last_seen = Some(last_seen.map_or(entry.last_shown, |max| max.max(entry.last_shown)));
@@ -809,7 +810,11 @@ pub fn format_gain_report(report: &GainReport, session_id: Option<&str>) -> Stri
     let _ = writeln!(out, "─────────────────────────────────────");
     // Commands line with optional session count
     if let Some(sc) = report.session_count {
-        let _ = writeln!(out, "  Commands:    {}  (across {} sessions)", report.total_commands, sc);
+        let _ = writeln!(
+            out,
+            "  Commands:    {}  (across {} sessions)",
+            report.total_commands, sc
+        );
     } else {
         let _ = writeln!(out, "  Commands:    {}", report.total_commands);
     }
@@ -820,7 +825,10 @@ pub fn format_gain_report(report: &GainReport, session_id: Option<&str>) -> Stri
         report.total_filtered_bytes / 1024
     );
     // Reduction line with absolute savings
-    let saved_kb = (report.total_raw_bytes.saturating_sub(report.total_filtered_bytes)) / 1024;
+    let saved_kb = (report
+        .total_raw_bytes
+        .saturating_sub(report.total_filtered_bytes))
+        / 1024;
     let _ = writeln!(
         out,
         "  Reduction:   {:.1}% ({} bps, {} KB saved)",

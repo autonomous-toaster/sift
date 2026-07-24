@@ -43,7 +43,16 @@ fn load_plugin_and_register(lua: &mut SiftLua, name: &str) {
 fn test_smoke_all_plugins_see_full_api() {
     let mut lua = SiftLua::new(None, test_context()).unwrap();
 
-    let plugin_names = ["sift-read", "cat", "head", "tail", "sed", "openspec", "rtk"];
+    let plugin_names = [
+        "sift-read",
+        "cat",
+        "head",
+        "tail",
+        "sed",
+        "openspec",
+        "rtk",
+        "jq",
+    ];
 
     for name in &plugin_names {
         load_plugin_and_register(&mut lua, name);
@@ -532,4 +541,136 @@ fn test_gain_report_via_lua() {
         json_result.contains("per_plugin"),
         "JSON report should have per_plugin: {json_result}"
     );
+}
+
+#[test]
+fn test_jq_plugin_basic_filter() {
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    load_plugin_and_register(&mut lua, "jq");
+
+    // Test basic filter with piped stdin via dispatch_full
+    // The jq plugin receives piped stdin from try_pipeline
+    // We test by calling dispatch_full with a pipeline
+    let cmd = r##"echo '{"name":"John","age":30}' | jq '.name'"##;
+    let (output, code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+    assert_eq!(code, 0, "jq basic filter should succeed, got: {output}");
+    assert!(
+        output.contains("John"),
+        "output should contain John: {output}"
+    );
+}
+
+#[test]
+fn test_jq_plugin_raw_output() {
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    load_plugin_and_register(&mut lua, "jq");
+
+    // Test -r raw output
+    let cmd = r##"echo '{"name":"John","age":30}' | jq -r '.name'"##;
+    let (output, code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+    assert_eq!(code, 0, "jq -r should succeed, got: {output}");
+    assert!(
+        output.contains("John"),
+        "raw output should contain John: {output}"
+    );
+}
+
+#[test]
+fn test_jq_plugin_null_input() {
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    load_plugin_and_register(&mut lua, "jq");
+
+    // Test -n null input
+    let cmd = r##"jq -n '{a: 1, b: 2}'"##;
+    let (output, code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+    assert_eq!(code, 0, "jq -n should succeed, got: {output}");
+    assert!(
+        output.contains("1") && output.contains("2"),
+        "output should contain values: {output}"
+    );
+}
+
+#[test]
+fn test_jq_plugin_unknown_flag_fallthrough() {
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    load_plugin_and_register(&mut lua, "jq");
+
+    // Test unknown flag --arg → should fall through to real jq
+    // dispatch_full returns passthrough output from bash
+    let cmd = r##"echo '{}' | jq --arg name foo '.name'"##;
+    let (output, code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+    // Passthrough should still produce output (real jq runs)
+    assert_eq!(
+        code, 0,
+        "jq --arg fallthrough should succeed, got: {output}"
+    );
+}
+
+#[test]
+fn test_jq_plugin_no_stdin_fallthrough() {
+    use std::io::Write;
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    load_plugin_and_register(&mut lua, "jq");
+
+    // Test no stdin and no -n → should fall through to real jq
+    // jq with file argument: jq '.name' data.json
+    // This should passthrough since the plugin can't handle file args
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.json");
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(f, "{{\"name\":\"John\"}}").unwrap();
+    drop(f);
+
+    let cmd = format!("jq '.name' {}", path.display());
+    let (output, code, _plugin) = lua.dispatch_full(&cmd, None::<mlua::Value>).unwrap();
+    assert_eq!(
+        code, 0,
+        "jq file arg fallthrough should succeed, got: {output}"
+    );
+    assert!(
+        output.contains("John"),
+        "output should contain John: {output}"
+    );
+}
+
+#[test]
+fn test_curl_plugin_verbose_passthrough() {
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    load_plugin_and_register(&mut lua, "curl");
+
+    // Test that verbose mode passthrough works (no HTTP request made)
+    // -v flag triggers passthrough which runs real curl
+    // In test environment, curl will fail but the plugin should handle it
+    let cmd = "curl -v http://nonexistent.example.test 2>/dev/null";
+    let (_output, _code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+    // Plugin should handle the command without crashing
+    // Exit code may be non-zero (curl fails on nonexistent host), but plugin should not error
+}
+
+#[test]
+fn test_curl_plugin_extension_fallback_url_parsing() {
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    load_plugin_and_register(&mut lua, "curl");
+
+    // Test that the curl plugin handles URLs with various extensions
+    // without crashing. The extension fallback is a URL pattern match
+    // that activates when content-type is unrecognized.
+    // These requests will fail (no network), but the plugin should
+    // handle the URL parsing without errors.
+
+    // .md URL
+    let cmd = "curl -s https://raw.githubusercontent.com/user/repo/main/README.md 2>/dev/null";
+    let (_output, _code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+
+    // .json URL
+    let cmd = "curl -s https://api.example.com/data.json 2>/dev/null";
+    let (_output, _code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+
+    // URL without extension
+    let cmd = "curl -s https://api.example.com/data 2>/dev/null";
+    let (_output, _code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+
+    // URL with query params
+    let cmd = "curl -s 'https://api.example.com/data.json?format=pretty' 2>/dev/null";
+    let (_output, _code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
 }

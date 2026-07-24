@@ -140,6 +140,45 @@ return {
             end
         end
 
+        -- Not a recognized format: check URL extension as fallback
+        -- GitHub serves .md and .json files as text/plain
+        if body then
+            -- Extract URL from args (last non-flag argument)
+            local url
+            for _, arg in ipairs(args) do
+                if arg:sub(1, 1) ~= "-" then
+                    url = arg
+                end
+            end
+            if url then
+                local ext = url:match("%.([%w]+)%s*$")
+                if ext then
+                    ext = ext:lower()
+                    if ext == "md" or ext == "markdown" then
+                        -- .md file: apply mdmin compression
+                        if sift.ext.markdown ~= nil then
+                            local compressed = sift.ext.markdown.compress(ctx, body, { level = 2 })
+                            return {
+                                status = "handled",
+                                output = compressed,
+                                exit_code = exit_code,
+                                raw_bytes = #body
+                            }
+                        end
+                    elseif ext == "json" then
+                        -- .json file: apply TOON compression
+                        local compressed = sift.json.shortest(ctx, body, { toon = true })
+                        return {
+                            status = "handled",
+                            output = compressed,
+                            exit_code = exit_code,
+                            raw_bytes = #body
+                        }
+                    end
+                end
+            end
+        end
+
         -- Not a recognized format: return as-is
         return {
             status = "handled",

@@ -527,7 +527,6 @@ sift/
 
 - Rust 1.75+
 - bash (at `/bin/bash`, `/usr/bin/bash`, or in PATH)
-- Optional: `jaq` CLI for `sift.jq.query()` (`cargo install jaq`)
 - Optional: `rtk` CLI for `rtk.lua` plugin delegation
 - Optional: `xberg` feature — pulls in xberg crate for PDF/document text extraction
 - Optional: `html-md` feature — pulls in html-to-markdown-rs for HTML→Markdown conversion
