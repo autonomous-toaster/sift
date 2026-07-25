@@ -120,7 +120,7 @@ crap:
 # Check that no production source file exceeds the target line limit.
 # `max` is the soft target (default 500); `tolerance` adds a small grace margin (default 10%).
 # Files under tests/ directories are excluded.
-check-file-sizes max="500" tolerance="80":
+check-file-sizes max="500" tolerance="10":
     #!/usr/bin/env bash
     TARGET={{max}}
     TOL={{tolerance}}
