@@ -33,6 +33,14 @@ struct Args {
     /// Show gain report (token reduction stats).
     #[arg(long = "gain")]
     gain: bool,
+
+    /// Show daily time-series in gain report.
+    #[arg(long = "daily")]
+    daily: bool,
+
+    /// Show weekly time-series in gain report.
+    #[arg(long = "weekly")]
+    weekly: bool,
 }
 
 #[tokio::main]
@@ -52,6 +60,8 @@ async fn main() -> Result<()> {
                 all: false,
                 session: None,
                 since: None,
+                daily: args.daily,
+                weekly: args.weekly,
             };
             let effective_session = session_id.as_deref();
             let report =

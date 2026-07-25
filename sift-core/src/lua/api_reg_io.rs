@@ -625,6 +625,10 @@ pub struct GainFlags {
     pub session: Option<String>,
     /// Filter by timestamp (unix ms).
     pub since: Option<i64>,
+    /// Show daily time-series.
+    pub daily: bool,
+    /// Show weekly time-series.
+    pub weekly: bool,
 }
 
 fn parse_gain_flags(args: &Table) -> GainFlags {
@@ -634,6 +638,8 @@ fn parse_gain_flags(args: &Table) -> GainFlags {
         all: args.get::<bool>("all").unwrap_or(false),
         session: args.get::<String>("session").ok(),
         since: args.get::<i64>("since").ok(),
+        daily: args.get::<bool>("daily").unwrap_or(false),
+        weekly: args.get::<bool>("weekly").unwrap_or(false),
     }
 }
 
@@ -643,6 +649,10 @@ pub struct GainReport {
     total_commands: i64,
     total_raw_bytes: i64,
     total_filtered_bytes: i64,
+    total_saved_bytes: i64,
+    total_raw_tokens: i64,
+    total_filtered_tokens: i64,
+    total_saved_tokens: i64,
     reduction_bps: i64,
     bypass_count: i64,
     session_count: Option<i64>,
@@ -650,6 +660,9 @@ pub struct GainReport {
     last_seen: Option<i64>,
     per_plugin: Vec<PluginGain>,
     commands: Option<Vec<CommandEntry>>,
+    top_bypassed: Vec<BypassEntry>,
+    sequential_dups: Vec<SequentialDup>,
+    daily: Vec<DayEntry>,
 }
 
 #[derive(serde::Serialize)]
@@ -673,12 +686,39 @@ pub struct CommandEntry {
     output_format: String,
 }
 
+#[derive(serde::Serialize)]
+/// A bypassed command entry in the top-bypassed section.
+pub struct BypassEntry {
+    command: String,
+    calls: i64,
+    cache_hits: i64,
+    hit_rate: f64,
+}
+
+#[derive(serde::Serialize)]
+/// A sequential duplicate command entry.
+pub struct SequentialDup {
+    command: String,
+    run_count: i64,
+    bytes_saved: i64,
+}
+
+#[derive(serde::Serialize)]
+/// A day entry in the time-series section.
+pub struct DayEntry {
+    date: String,
+    raw_bytes: i64,
+    filtered_bytes: i64,
+    saved_bytes: i64,
+}
+
 /// Query the session store and generate a gain report.
 pub async fn generate_gain_report(
     store: &crate::session::SessionStore,
     session_id: Option<&str>,
     flags: &GainFlags,
 ) -> Result<GainReport, anyhow::Error> {
+    const SHELL_META: [&str; 6] = ["exit", "cd", "pushd", "popd", "source", "."];
     let entries = store.query_conversations(session_id).await?;
 
     let mut total_commands: i64 = 0;
@@ -769,10 +809,113 @@ pub async fn generate_gain_report(
         .collect();
     per_plugin.sort_by_key(|a| std::cmp::Reverse(a.calls));
 
+    // Compute absolute savings and token estimates (chars/4 heuristic)
+    let total_saved_bytes = total_raw_bytes.saturating_sub(total_filtered_bytes);
+    let total_raw_tokens = total_raw_bytes / 4;
+    let total_filtered_tokens = total_filtered_bytes / 4;
+    let total_saved_tokens = total_saved_bytes / 4;
+
+    // Aggregate top bypassed commands
+    let mut bypass_map: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
+    for entry in &entries {
+        if entry.output_format.as_deref() == Some("passthrough") {
+            let cmd = match entry.command.as_deref() {
+                Some(c) if SHELL_META.contains(&c) => continue,
+                Some(c) => c.to_string(),
+                None => "(unknown)".to_string(),
+            };
+            let e = bypass_map.entry(cmd).or_insert((0, 0));
+            e.0 += 1;
+            if entry.cache_hit.unwrap_or(false) {
+                e.1 += 1;
+            }
+        }
+    }
+    let mut top_bypassed: Vec<BypassEntry> = bypass_map
+        .into_iter()
+        .map(|(command, (calls, cache_hits))| BypassEntry {
+            hit_rate: if calls > 0 {
+                cache_hits as f64 / calls as f64
+            } else {
+                0.0
+            },
+            command,
+            calls,
+            cache_hits,
+        })
+        .collect();
+    top_bypassed.sort_by_key(|a| std::cmp::Reverse(a.calls));
+    top_bypassed.truncate(10);
+
+    // Detect sequential duplicates
+    let mut sequential_dups: Vec<SequentialDup> = Vec::new();
+    if flags.verbose {
+        let mut prev_cmd: Option<&str> = None;
+        let mut run_count: i64 = 0;
+        let mut run_saved: i64 = 0;
+        for entry in &entries {
+            let cmd = entry.command.as_deref().unwrap_or("?");
+            if Some(cmd) == prev_cmd {
+                run_count += 1;
+                run_saved += entry
+                    .raw_bytes
+                    .unwrap_or(0)
+                    .saturating_sub(entry.filtered_bytes.unwrap_or(0));
+            } else if run_count > 1 {
+                sequential_dups.push(SequentialDup {
+                    command: prev_cmd.unwrap_or("?").to_string(),
+                    run_count,
+                    bytes_saved: run_saved,
+                });
+                run_count = 1;
+                run_saved = 0;
+            } else {
+                run_count = 1;
+                run_saved = 0;
+            }
+            prev_cmd = Some(cmd);
+        }
+        // Flush last run
+        if run_count > 1 {
+            sequential_dups.push(SequentialDup {
+                command: prev_cmd.unwrap_or("?").to_string(),
+                run_count,
+                bytes_saved: run_saved,
+            });
+        }
+    }
+
+    // Aggregate daily savings
+    let mut day_map: std::collections::BTreeMap<String, (i64, i64)> =
+        std::collections::BTreeMap::new();
+    for entry in &entries {
+        if let Some(date) = timestamp_to_date(entry.first_shown) {
+            let raw = entry.raw_bytes.unwrap_or(0);
+            let filtered = entry.filtered_bytes.unwrap_or(0);
+            let e = day_map.entry(date).or_insert((0, 0));
+            e.0 += raw;
+            e.1 += filtered;
+        }
+    }
+    let daily: Vec<DayEntry> = day_map
+        .into_iter()
+        .map(|(date, (raw_bytes, filtered_bytes))| DayEntry {
+            saved_bytes: raw_bytes.saturating_sub(filtered_bytes),
+            date,
+            raw_bytes,
+            filtered_bytes,
+        })
+        .collect();
+
     Ok(GainReport {
         total_commands,
         total_raw_bytes,
         total_filtered_bytes,
+        total_saved_bytes,
+        total_raw_tokens,
+        total_filtered_tokens,
+        total_saved_tokens,
         reduction_bps,
         bypass_count,
         session_count: if session_id.is_none() {
@@ -788,7 +931,39 @@ pub async fn generate_gain_report(
         } else {
             None
         },
+        top_bypassed,
+        sequential_dups,
+        daily,
     })
+}
+
+/// Format bytes with auto-scaling (B, KB, MB, GB).
+fn format_bytes(bytes: i64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut val = bytes as f64;
+    let mut unit_idx = 0;
+    while val.abs() >= 1024.0 && unit_idx < 3 {
+        val /= 1024.0;
+        unit_idx += 1;
+    }
+    if unit_idx == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{:.1} {}", val, UNITS[unit_idx])
+    }
+}
+
+/// Format integer with thousand separators.
+fn format_int(n: i64) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (pos, c) in s.chars().enumerate() {
+        if pos > 0 && (s.len() - pos).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
 }
 
 /// Convert a unix-ms timestamp to a YYYY-MM-DD date string.
@@ -818,30 +993,38 @@ pub fn format_gain_report(report: &GainReport, session_id: Option<&str>) -> Stri
     } else {
         let _ = writeln!(out, "  Commands:    {}", report.total_commands);
     }
-    let _ = writeln!(out, "  Raw:         {} KB", report.total_raw_bytes / 1024);
     let _ = writeln!(
         out,
-        "  Filtered:    {} KB",
-        report.total_filtered_bytes / 1024
+        "  Raw:         {}",
+        format_bytes(report.total_raw_bytes)
+    );
+    let _ = writeln!(
+        out,
+        "  Filtered:    {}",
+        format_bytes(report.total_filtered_bytes)
     );
     // Reduction line with absolute savings
-    let saved_kb = (report
-        .total_raw_bytes
-        .saturating_sub(report.total_filtered_bytes))
-        / 1024;
+    let saved_fmt = format_bytes(
+        report
+            .total_raw_bytes
+            .saturating_sub(report.total_filtered_bytes),
+    );
     let _ = writeln!(
         out,
-        "  Reduction:   {:.1}% ({} bps, {} KB saved)",
-        reduction_pct, report.reduction_bps, saved_kb
+        "  Reduction:   {:.1}% ({} bps, {} saved, ~{} tokens saved)",
+        reduction_pct,
+        format_int(report.reduction_bps),
+        saved_fmt,
+        format_int(report.total_saved_tokens)
     );
     let _ = writeln!(out, "  Bypasses:    {}", report.bypass_count);
     // Date range line
     if let (Some(first), Some(last)) = (report.first_seen, report.last_seen) {
         if let (Some(f_dt), Some(l_dt)) = (timestamp_to_date(first), timestamp_to_date(last)) {
             if f_dt == l_dt {
-                let _ = writeln!(out, "  Period:      {}", f_dt);
+                let _ = writeln!(out, "  Period:      {f_dt}");
             } else {
-                let _ = writeln!(out, "  Period:      {} – {}", f_dt, l_dt);
+                let _ = writeln!(out, "  Period:      {f_dt} – {l_dt}");
             }
         }
     }
@@ -849,13 +1032,76 @@ pub fn format_gain_report(report: &GainReport, session_id: Option<&str>) -> Stri
     let _ = writeln!(out, "  Per plugin:");
     for p in &report.per_plugin {
         let pct = p.reduction_bps as f64 / 100.0;
+        let saved = p.raw_bytes.saturating_sub(p.filtered_bytes);
+        let tokens = saved / 4;
         if p.plugin == "command" {
             let _ = writeln!(out, "    {:20} {:>4} calls   (bypass)", p.plugin, p.calls);
         } else {
             let _ = writeln!(
                 out,
-                "    {:20} {:>4} calls   {:.1}% reduction",
-                p.plugin, p.calls, pct
+                "    {:20} {:>4} calls   {:.1}%   ({} saved, ~{} tokens)",
+                p.plugin,
+                p.calls,
+                pct,
+                format_bytes(saved),
+                format_int(tokens)
+            );
+        }
+    }
+
+    // Top bypassed section
+    if !report.top_bypassed.is_empty() {
+        let _ = writeln!(out, "  ─────────────────────────────────────");
+        let _ = writeln!(out, "  Top bypassed:");
+        for b in &report.top_bypassed {
+            let _ = writeln!(
+                out,
+                "    {:30} {:>4} calls, {} cache hits ({:.0}% hit rate)",
+                b.command,
+                b.calls,
+                b.cache_hits,
+                b.hit_rate * 100.0
+            );
+        }
+    }
+
+    // Sequential duplicates section (verbose only)
+    if !report.sequential_dups.is_empty() {
+        let _ = writeln!(out, "  ─────────────────────────────────────");
+        let _ = writeln!(out, "  Sequential duplicates:");
+        for d in &report.sequential_dups {
+            let _ = writeln!(
+                out,
+                "    {:30} ran {} times, {} bytes saved",
+                d.command, d.run_count, d.bytes_saved
+            );
+        }
+    }
+
+    // Time-series section
+    if !report.daily.is_empty() {
+        let _ = writeln!(out, "  ─────────────────────────────────────");
+        let _ = writeln!(out, "  Daily savings:");
+        let max_saved = report
+            .daily
+            .iter()
+            .map(|d| d.saved_bytes)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        for d in &report.daily {
+            let bar_len = if d.saved_bytes > 0 && max_saved > 0 {
+                (d.saved_bytes * 20 / max_saved) as usize
+            } else {
+                0
+            };
+            let bar = "█".repeat(bar_len);
+            let _ = writeln!(
+                out,
+                "    {} {:>10}  {}",
+                d.date,
+                format_bytes(d.saved_bytes),
+                bar
             );
         }
     }

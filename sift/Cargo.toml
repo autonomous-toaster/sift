@@ -37,4 +37,6 @@ xberg = ["sift-core/xberg"]
 mdmin = ["sift-core/mdmin"]
 
 [dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
 tempfile = { workspace = true }

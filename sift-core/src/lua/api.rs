@@ -6,8 +6,8 @@ use mlua::{Function, Table, Value};
 use std::io::Write;
 
 /// Lua chunk that wraps execute call + result extraction into one VM call.
-/// Reduces Lua C API calls from 3 (call + 3x raw_get) to 1.
-pub(crate) const DISPATCH_WRAPPER: &str = r#"
+/// Reduces Lua C API calls from 3 (call + 3x `raw_get`) to 1.
+pub const DISPATCH_WRAPPER: &str = r#"
     return function(execute, ctx, args, stdin)
         local ok, plugin_result = pcall(execute, ctx, args, stdin)
         if ok then
@@ -93,7 +93,7 @@ impl SiftLua {
         for (i, entry) in self.plugins.iter().enumerate() {
             for p in &entry.patterns {
                 // Only insert if this plugin has higher priority than existing match
-                let should_insert = self.pattern_map.get(p).map_or(true, |&existing_idx| {
+                let should_insert = self.pattern_map.get(p).is_none_or(|&existing_idx| {
                     let existing = &self.plugins[existing_idx];
                     let new_len = p.len();
                     let existing_max = existing.patterns.iter().map(String::len).max().unwrap_or(0);
@@ -343,28 +343,30 @@ impl SiftLua {
         stdin: Option<Value>,
         merge_stderr: bool,
     ) -> Result<(String, i32, String)> {
+        // Record dispatch start time for exec_time_ms measurement
+        if let Ok(mut start) = self.dispatch_start.lock() {
+            *start = Some(std::time::Instant::now());
+        }
+
         let entry = self.find_entry(cmd, args)?;
 
         let execute: Function = self.lua.registry_value(&entry.execute_fn)?;
 
         // Build context table from pre-created template, update changing fields
-        let ctx = match self.ctx_template_key.as_ref() {
-            Some(key) => {
-                let t: Table = self.lua.registry_value(key)?;
-                t.set("cmd_count", self.ctx.cmd_count.get())?;
-                t.set("command", cmd)?;
-                t.set("merge_stderr", merge_stderr)?;
-                t
-            }
-            None => {
-                let t = self.lua.create_table()?;
-                t.set("cwd", self.ctx.cwd_str.as_str())?;
-                t.set("session_id", self.session_id_str.as_str())?;
-                t.set("cmd_count", self.ctx.cmd_count.get())?;
-                t.set("command", cmd)?;
-                t.set("merge_stderr", merge_stderr)?;
-                t
-            }
+        let ctx = if let Some(key) = self.ctx_template_key.as_ref() {
+            let t: Table = self.lua.registry_value(key)?;
+            t.set("cmd_count", self.ctx.cmd_count.get())?;
+            t.set("command", cmd)?;
+            t.set("merge_stderr", merge_stderr)?;
+            t
+        } else {
+            let t = self.lua.create_table()?;
+            t.set("cwd", self.ctx.cwd_str.as_str())?;
+            t.set("session_id", self.session_id_str.as_str())?;
+            t.set("cmd_count", self.ctx.cmd_count.get())?;
+            t.set("command", cmd)?;
+            t.set("merge_stderr", merge_stderr)?;
+            t
         };
 
         // Build args table (arguments only, no command name)
@@ -391,15 +393,14 @@ impl SiftLua {
 
         // Use dispatch wrapper: single Lua VM call instead of call + 3x raw_get
         let (status, output, exit_code, result): (String, String, i32, Option<Table>) =
-            match self.dispatch_wrapper.as_ref() {
-                Some(wrapper) => wrapper.call((&execute, &ctx, &args_table, stdin_val))?,
-                None => {
-                    let r: Table = execute.call((ctx, args_table, stdin_val))?;
-                    let s: String = r.raw_get("status")?;
-                    let o: String = r.raw_get("output").unwrap_or_default();
-                    let ec: i32 = r.raw_get("exit_code").unwrap_or(0);
-                    (s, o, ec, Some(r))
-                }
+            if let Some(wrapper) = self.dispatch_wrapper.as_ref() {
+                wrapper.call((&execute, &ctx, &args_table, stdin_val))?
+            } else {
+                let r: Table = execute.call((ctx, args_table, stdin_val))?;
+                let s: String = r.raw_get("status")?;
+                let o: String = r.raw_get("output").unwrap_or_default();
+                let ec: i32 = r.raw_get("exit_code").unwrap_or(0);
+                (s, o, ec, Some(r))
             };
 
         if status == "passthrough" {
@@ -412,6 +413,9 @@ impl SiftLua {
                 Some(raw),
                 Some("command"),
                 Some("passthrough"),
+                Some(cmd.to_string()),
+                None,
+                None,
             );
             return Ok((
                 passthrough_output,
@@ -457,7 +461,7 @@ impl SiftLua {
             // Write handled output directly to stdout (unless already streamed by plugin)
             let streamed: bool = result
                 .as_ref()
-                .map_or(false, |r| r.raw_get("streamed").unwrap_or(false));
+                .is_some_and(|r| r.raw_get("streamed").unwrap_or(false));
             if !streamed && !output.is_empty() {
                 print!("{output}");
                 let _ = std::io::stdout().flush();
@@ -486,12 +490,19 @@ impl SiftLua {
         } else {
             Some("text")
         };
+        let cache_hit = Some(output_format == Some("unchanged"));
+        let exec_time_ms = self.dispatch_start.lock().map_or(None, |start| {
+            start.map(|s| i64::try_from(s.elapsed().as_millis()).unwrap_or(i64::MAX))
+        });
         self.record_conversation(
             cmd,
             raw_bytes.or(Some(filtered_bytes)),
             Some(filtered_bytes),
             plugin_name,
             output_format,
+            Some(cmd.to_string()),
+            exec_time_ms,
+            cache_hit,
         );
 
         // Increment command counter for next dispatch
@@ -526,6 +537,9 @@ impl SiftLua {
         filtered_bytes: Option<i64>,
         plugin_name: Option<&str>,
         output_format: Option<&str>,
+        command: Option<String>,
+        exec_time_ms: Option<i64>,
+        cache_hit: Option<bool>,
     ) {
         let Some(store) = self.store.clone() else {
             return;
@@ -557,25 +571,25 @@ impl SiftLua {
                     filtered_bytes,
                     plugin_name,
                     output_format,
+                    command,
+                    exec_time_ms,
+                    cache_hit,
                 )
                 .await;
         };
 
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                tokio::task::block_in_place(move || {
-                    let _ = handle.block_on(record);
-                });
-            }
-            Err(_) => {
-                let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                else {
-                    return;
-                };
-                rt.block_on(record);
-            }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(move || {
+                let () = handle.block_on(record);
+            });
+        } else {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(record);
         }
     }
 
@@ -723,7 +737,7 @@ fn peel_pushd_prefix(input: &str) -> Option<String> {
 
 /// Shell-quote a string for safe use in bash command construction.
 /// Wraps the string in single quotes and escapes any single quotes within.
-pub(crate) fn sh_quote(s: &str) -> String {
+pub fn sh_quote(s: &str) -> String {
     if s.is_empty() {
         return String::from("''");
     }

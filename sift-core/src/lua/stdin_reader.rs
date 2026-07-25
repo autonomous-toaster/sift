@@ -35,7 +35,7 @@ impl StdinReader {
     }
 
     /// Create a string-backed reader.
-    pub fn from_string(s: String) -> Self {
+    pub const fn from_string(s: String) -> Self {
         Self {
             data: s.into_bytes(),
             pos: Cell::new(0),
@@ -56,17 +56,14 @@ impl StdinReader {
         // Find next newline
         let remaining = &self.data[pos..];
         let newline_pos = remaining.iter().position(|&b| b == b'\n');
-        match newline_pos {
-            Some(nl) => {
-                let line = String::from_utf8_lossy(&remaining[..nl]).to_string();
-                self.pos.set(pos + nl + 1); // skip past newline
-                Some(line)
-            }
-            None => {
-                let line = String::from_utf8_lossy(remaining).to_string();
-                self.pos.set(self.data.len());
-                Some(line)
-            }
+        if let Some(nl) = newline_pos {
+            let line = String::from_utf8_lossy(&remaining[..nl]).to_string();
+            self.pos.set(pos + nl + 1); // skip past newline
+            Some(line)
+        } else {
+            let line = String::from_utf8_lossy(remaining).to_string();
+            self.pos.set(self.data.len());
+            Some(line)
         }
     }
 }
@@ -105,7 +102,9 @@ impl UserData for StdinReader {
             let pos = Arc::new(Mutex::new(reader.pos.get()));
             let func = lua.create_function(move |lua, ()| {
                 let current = {
-                    let p = pos.lock().unwrap_or_else(|e| e.into_inner());
+                    let p = pos
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     *p
                 };
                 if current >= data.len() {
@@ -113,21 +112,18 @@ impl UserData for StdinReader {
                 }
                 let remaining = &data[current..];
                 let newline_pos = remaining.iter().position(|&b| b == b'\n');
-                match newline_pos {
-                    Some(nl) => {
-                        let line = String::from_utf8_lossy(&remaining[..nl]).to_string();
-                        if let Ok(mut p) = pos.lock() {
-                            *p = current + nl + 1;
-                        }
-                        Ok(Value::String(lua.create_string(&line)?))
+                if let Some(nl) = newline_pos {
+                    let line = String::from_utf8_lossy(&remaining[..nl]).to_string();
+                    if let Ok(mut p) = pos.lock() {
+                        *p = current + nl + 1;
                     }
-                    None => {
-                        let line = String::from_utf8_lossy(remaining).to_string();
-                        if let Ok(mut p) = pos.lock() {
-                            *p = data.len();
-                        }
-                        Ok(Value::String(lua.create_string(&line)?))
+                    Ok(Value::String(lua.create_string(&line)?))
+                } else {
+                    let line = String::from_utf8_lossy(remaining).to_string();
+                    if let Ok(mut p) = pos.lock() {
+                        *p = data.len();
                     }
+                    Ok(Value::String(lua.create_string(&line)?))
                 }
             })?;
             Ok(func)

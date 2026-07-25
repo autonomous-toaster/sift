@@ -102,17 +102,23 @@ sift gain
   Commands:    47
   Raw:         1.2 MB
   Filtered:    340 KB
-  Reduction:   71.7% (8,944 bps)
+  Reduction:   71.7% (8,944 bps, 884 KB saved, ~226,304 tokens saved)
   Bypasses:    3
+  Period:      2026-07-18 – 2026-07-25
   ─────────────────────────────────────
   Per plugin:
-    cat.lua             15 calls   82.3% reduction
-    sift-read.lua       12 calls   65.1% reduction
-    bash.lua            10 calls    0.0% reduction
+    cat.lua             15 calls  82.3%   (723 KB saved, ~185,088 tokens)
+    sift-read.lua       12 calls  65.1%   (145 KB saved, ~37,120 tokens)
+    bash.lua            10 calls   0.0%   (0 B saved, ~0 tokens)
     command.lua          3 calls   (bypass)
+  ─────────────────────────────────────
+  Top bypassed:
+    (unknown)            2 calls, 0 cache hits (0% hit rate)
   ─────────────────────────────────────
   Session: my-session
 ```
+
+Use `--daily` or `--weekly` to show time-series data. Use `--verbose` for per-command breakdown and sequential duplicate detection.
 
 ## Lua plugin API
 
@@ -260,6 +266,8 @@ sift.gain.report(flags?)          → gain report string
   -- flags.all: true | false (all sessions)
   -- flags.session: "session-id"
   -- flags.since: timestamp_ms
+  -- flags.daily: true | false (show daily time-series)
+  -- flags.weekly: true | false (show weekly time-series)
 
 sift.meta.session_id              -- current session ID
 sift.meta.cmd_count               -- command counter

@@ -110,16 +110,14 @@ impl SiftLua {
                     }
 
                     let input = xberg::ExtractInput::from_uri(&path);
-                    let result = match tokio::runtime::Handle::try_current() {
-                        Ok(handle) => tokio::task::block_in_place(move || {
+                    let result = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        tokio::task::block_in_place(move || {
                             handle.block_on(xberg::extract(input, &config))
-                        }),
-                        Err(_) => {
-                            let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                                mlua::Error::external(format!("tokio runtime: {e}"))
-                            })?;
-                            rt.block_on(xberg::extract(input, &config))
-                        }
+                        })
+                    } else {
+                        let rt = tokio::runtime::Runtime::new()
+                            .map_err(|e| mlua::Error::external(format!("tokio runtime: {e}")))?;
+                        rt.block_on(xberg::extract(input, &config))
                     }
                     .map_err(|e| mlua::Error::external(format!("xberg extract: {e}")))?;
 
@@ -155,15 +153,14 @@ impl SiftLua {
 
                 let raw: &[u8] = &bytes.as_bytes();
                 let input = xberg::ExtractInput::from_bytes(raw.to_vec(), &mime_str, None);
-                let result = match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => tokio::task::block_in_place(move || {
+                let result = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    tokio::task::block_in_place(move || {
                         handle.block_on(xberg::extract(input, &config))
-                    }),
-                    Err(_) => {
-                        let rt = tokio::runtime::Runtime::new()
-                            .map_err(|e| mlua::Error::external(format!("tokio runtime: {e}")))?;
-                        rt.block_on(xberg::extract(input, &config))
-                    }
+                    })
+                } else {
+                    let rt = tokio::runtime::Runtime::new()
+                        .map_err(|e| mlua::Error::external(format!("tokio runtime: {e}")))?;
+                    rt.block_on(xberg::extract(input, &config))
                 }
                 .map_err(|e| mlua::Error::external(format!("xberg extract: {e}")))?;
 

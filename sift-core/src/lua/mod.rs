@@ -39,14 +39,16 @@ pub struct SiftLua {
     nudges: Arc<Mutex<Vec<String>>>,
     /// Recent unchanged responses for burst detection: (key, `timestamp_ms`).
     recent_unchanged: Arc<Mutex<Vec<(String, u128)>>>,
-    /// Cached session_id string to avoid repeated clone+unwrap.
+    /// Cached `session_id` string to avoid repeated clone+unwrap.
     session_id_str: String,
-    /// Unique invocation ID (per-process) to disambiguate item_ids across sift -c invocations.
+    /// Unique invocation ID (per-process) to disambiguate `item_ids` across sift -c invocations.
     invocation_id: String,
-    /// Registry key for pre-created ctx table template (cwd, session_id pre-set).
+    /// Registry key for pre-created ctx table template (cwd, `session_id` pre-set).
     ctx_template_key: Option<mlua::RegistryKey>,
     /// Cached dispatch wrapper chunk (combines execute call + result extraction).
     dispatch_wrapper: Option<mlua::Function>,
+    /// Start time of the current dispatch (for `exec_time_ms` measurement).
+    dispatch_start: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 /// Context passed to plugin execution.
@@ -103,6 +105,7 @@ impl SiftLua {
             invocation_id,
             ctx_template_key: None,
             dispatch_wrapper: None,
+            dispatch_start: Arc::new(Mutex::new(None)),
         };
 
         runtime.register_sift_table()?;

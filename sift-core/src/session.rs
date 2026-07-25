@@ -101,6 +101,12 @@ pub struct ConversationEntry {
     pub plugin_name: Option<String>,
     /// Format of the output (json, toon, text).
     pub output_format: Option<String>,
+    /// The actual command string (truncated to 200 chars).
+    pub command: Option<String>,
+    /// Execution duration in milliseconds.
+    pub exec_time_ms: Option<i64>,
+    /// Whether this was a cache hit (`output_format` == "unchanged").
+    pub cache_hit: Option<bool>,
 }
 
 /// SQLite-backed session store.
@@ -153,11 +159,28 @@ impl SessionStore {
                 reduction_bps      INTEGER,
                 plugin_name        TEXT,
                 output_format      TEXT,
+                command            TEXT,
+                exec_time_ms       INTEGER,
+                cache_hit          INTEGER DEFAULT 0,
                 PRIMARY KEY (item_type, item_id)
             )",
         )
         .execute(&pool)
         .await?;
+
+        // Add columns for existing databases (ignore if already present)
+        sqlx::query("ALTER TABLE conversation_cache ADD COLUMN command TEXT")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE conversation_cache ADD COLUMN exec_time_ms INTEGER")
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("ALTER TABLE conversation_cache ADD COLUMN cache_hit INTEGER DEFAULT 0")
+            .execute(&pool)
+            .await
+            .ok();
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS sift_cache (
@@ -239,11 +262,15 @@ impl SessionStore {
                 Option<i64>,
                 Option<String>,
                 Option<String>,
+                Option<String>,
+                Option<i64>,
+                Option<i64>,
             ),
         >(
             "SELECT item_type, item_id, estimated_tokens, commands_since_at_create,
                     first_shown, last_shown, shown_count, re_requested,
-                    raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format
+                    raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format,
+                    command, exec_time_ms, cache_hit
              FROM conversation_cache
              WHERE item_type = ?1 AND item_id = ?2",
         )
@@ -267,6 +294,9 @@ impl SessionStore {
                 reduction_bps,
                 plugin_name,
                 output_format,
+                command,
+                exec_time_ms,
+                cache_hit,
             )| {
                 ConversationEntry {
                     item_type,
@@ -282,6 +312,9 @@ impl SessionStore {
                     reduction_bps,
                     plugin_name,
                     output_format,
+                    command,
+                    exec_time_ms,
+                    cache_hit: cache_hit.map(|v| v != 0),
                 }
             },
         ))
@@ -299,6 +332,9 @@ impl SessionStore {
         filtered_bytes: Option<i64>,
         plugin_name: Option<String>,
         output_format: Option<String>,
+        command: Option<String>,
+        exec_time_ms: Option<i64>,
+        cache_hit: Option<bool>,
     ) -> Result<()> {
         let now = chrono::Utc::now().timestamp_millis();
         // Compute reduction percentage using rational arithmetic to avoid f64 cast.
@@ -309,10 +345,11 @@ impl SessionStore {
             }
             _ => None,
         };
+        let cache_hit_int = cache_hit.map(i64::from);
 
         sqlx::query(
-            "INSERT INTO conversation_cache (item_type, item_id, estimated_tokens, commands_since_at_create, first_shown, last_shown, raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO conversation_cache (item_type, item_id, estimated_tokens, commands_since_at_create, first_shown, last_shown, raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format, command, exec_time_ms, cache_hit)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(item_type, item_id) DO UPDATE SET
                 last_shown = excluded.last_shown,
                 shown_count = shown_count + 1,
@@ -320,7 +357,10 @@ impl SessionStore {
                 filtered_bytes = excluded.filtered_bytes,
                 reduction_bps = excluded.reduction_bps,
                 plugin_name = excluded.plugin_name,
-                output_format = excluded.output_format",
+                output_format = excluded.output_format,
+                command = excluded.command,
+                exec_time_ms = excluded.exec_time_ms,
+                cache_hit = excluded.cache_hit",
         )
         .bind(item_type)
         .bind(item_id)
@@ -332,6 +372,9 @@ impl SessionStore {
         .bind(reduction_bps)
         .bind(&plugin_name)
         .bind(&output_format)
+        .bind(&command)
+        .bind(exec_time_ms)
+        .bind(cache_hit_int)
         .execute(&self.pool)
         .await?;
 
@@ -423,11 +466,15 @@ impl SessionStore {
                     Option<i64>,
                     Option<String>,
                     Option<String>,
+                    Option<String>,
+                    Option<i64>,
+                    Option<i64>,
                 ),
             >(
                 "SELECT item_type, item_id, estimated_tokens, commands_since_at_create,
                         first_shown, last_shown, shown_count, re_requested,
-                        raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format
+                        raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format,
+                        command, exec_time_ms, cache_hit
                  FROM conversation_cache
                  WHERE item_type = 'command_output' AND item_id LIKE ?1",
             )
@@ -451,11 +498,15 @@ impl SessionStore {
                     Option<i64>,
                     Option<String>,
                     Option<String>,
+                    Option<String>,
+                    Option<i64>,
+                    Option<i64>,
                 ),
             >(
                 "SELECT item_type, item_id, estimated_tokens, commands_since_at_create,
                         first_shown, last_shown, shown_count, re_requested,
-                        raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format
+                        raw_bytes, filtered_bytes, reduction_bps, plugin_name, output_format,
+                        command, exec_time_ms, cache_hit
                  FROM conversation_cache
                  WHERE item_type = 'command_output'",
             )
@@ -480,6 +531,9 @@ impl SessionStore {
                     reduction_bps,
                     plugin_name,
                     output_format,
+                    command,
+                    exec_time_ms,
+                    cache_hit,
                 )| {
                     ConversationEntry {
                         item_type,
@@ -495,6 +549,9 @@ impl SessionStore {
                         reduction_bps,
                         plugin_name,
                         output_format,
+                        command,
+                        exec_time_ms,
+                        cache_hit: cache_hit.map(|v| v != 0),
                     }
                 },
             )
@@ -567,6 +624,9 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -590,6 +650,9 @@ mod tests {
                 "test:id",
                 Some(100),
                 0,
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
@@ -621,6 +684,9 @@ mod tests {
                 "test:id",
                 Some(100),
                 0,
+                None,
+                None,
+                None,
                 None,
                 None,
                 None,
