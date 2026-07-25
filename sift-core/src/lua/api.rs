@@ -494,13 +494,20 @@ impl SiftLua {
         let exec_time_ms = self.dispatch_start.lock().map_or(None, |start| {
             start.map(|s| i64::try_from(s.elapsed().as_millis()).unwrap_or(i64::MAX))
         });
+        // Reconstruct full command from name + args
+        let full_cmd = if args.is_empty() {
+            cmd.to_string()
+        } else {
+            let quoted: Vec<String> = args.iter().map(|a| sh_quote(a)).collect();
+            format!("{} {}", cmd, quoted.join(" "))
+        };
         self.record_conversation(
             cmd,
             raw_bytes.or(Some(filtered_bytes)),
             Some(filtered_bytes),
             plugin_name,
             output_format,
-            Some(cmd.to_string()),
+            Some(full_cmd),
             exec_time_ms,
             cache_hit,
         );

@@ -678,7 +678,8 @@ pub struct PluginGain {
 #[derive(serde::Serialize)]
 /// Individual command entry in verbose gain report.
 pub struct CommandEntry {
-    id: String,
+    /// The actual command string.
+    command: String,
     plugin: String,
     raw_bytes: i64,
     filtered_bytes: i64,
@@ -770,7 +771,10 @@ pub async fn generate_gain_report(
 
         if flags.verbose {
             command_list.push(CommandEntry {
-                id: entry.item_id.clone(),
+                command: entry
+                    .command
+                    .clone()
+                    .unwrap_or_else(|| "(unknown)".to_string()),
                 plugin,
                 raw_bytes: raw,
                 filtered_bytes: filtered,
@@ -1118,8 +1122,11 @@ pub fn format_gain_report(report: &GainReport, session_id: Option<&str>) -> Stri
             let pct = c.reduction_bps as f64 / 100.0;
             let _ = writeln!(
                 out,
-                "    {:30} {:>8} → {:>8} ({:.1}%)",
-                c.id, c.raw_bytes, c.filtered_bytes, pct
+                "    {:40} {:>8} → {:>8} ({:.1}%)",
+                c.command,
+                format_bytes(c.raw_bytes),
+                format_bytes(c.filtered_bytes),
+                pct
             );
         }
     }

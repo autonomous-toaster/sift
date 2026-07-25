@@ -406,6 +406,26 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Clear gain data for the current session only.
+    pub async fn reset_session_gain_data(&self, session_id: &str) -> Result<()> {
+        let prefix = format!("{session_id}_");
+        sqlx::query(
+            "DELETE FROM conversation_cache WHERE item_type = 'command_output' AND item_id LIKE ?1",
+        )
+        .bind(format!("{prefix}%"))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Clear ALL gain data across all sessions.
+    pub async fn reset_all_gain_data(&self) -> Result<()> {
+        sqlx::query("DELETE FROM conversation_cache WHERE item_type = 'command_output'")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Check if a cache key exists for the given session.
     pub async fn cache_has(&self, key: &str, session_id: &str) -> Result<bool> {
         let row = sqlx::query_scalar::<_, i32>(
