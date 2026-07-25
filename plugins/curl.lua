@@ -107,7 +107,7 @@ return {
                 }
             elseif content_type:find("html") and sift.ext.html ~= nil then
                 -- HTML detected: convert to Markdown
-                local md = sift.ext.html.to_markdown(ctx, body)
+                local md = sift.ext.html.to_markdown(ctx, body, { strip_svg = true })
                 -- Optionally compress via mdmin
                 if sift.ext.markdown ~= nil then
                     md = sift.ext.markdown.compress(ctx, md, { level = 2 })

@@ -211,6 +211,11 @@ impl SiftLua {
                                 _ => html_to_markdown_rs::LinkStyle::Inline,
                             };
                         }
+                        if let Ok(strip) = o.get::<bool>("strip_svg") {
+                            if strip {
+                                options.exclude_selectors = vec!["svg".into(), "math".into()];
+                            }
+                        }
                     }
                     let result = html_to_markdown_rs::convert(&html, Some(options))
                         .map_err(|e| mlua::Error::external(format!("html to markdown: {e}")))?;
@@ -508,6 +513,40 @@ mod tests {
             .unwrap();
         assert!(result.contains("Title"), "should contain title text");
         assert!(result.contains("Hello"), "should contain paragraph text");
+    }
+
+    #[cfg(feature = "html-md")]
+    #[test]
+    fn test_html_to_markdown_strip_svg() {
+        let lua = SiftLua::new(None, test_context()).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let ext: Table = sift.get("ext").unwrap();
+        let html: Table = ext.get("html").unwrap();
+        let to_markdown: mlua::Function = html.get("to_markdown").unwrap();
+        let ctx = test_ctx(&lua.lua);
+
+        // strip_svg=true should remove SVG elements
+        let opts = lua.lua.create_table().unwrap();
+        opts.set("strip_svg", true).unwrap();
+        let html_with_svg = "<p>Hello</p><svg><path d=\"M10 10\"/></svg><p>World</p>";
+        let result: String = to_markdown
+            .call((ctx.clone(), html_with_svg, opts))
+            .unwrap();
+        assert!(result.contains("Hello"), "should keep text before SVG");
+        assert!(result.contains("World"), "should keep text after SVG");
+        assert!(
+            !result.contains("data:image/svg+xml;base64"),
+            "should not contain base64 SVG data URI"
+        );
+
+        // strip_svg=false (default) should preserve SVG as base64
+        let result2: String = to_markdown
+            .call((ctx, html_with_svg, mlua::Value::Nil))
+            .unwrap();
+        assert!(
+            result2.contains("data:image/svg+xml;base64"),
+            "default should contain base64 SVG data URI"
+        );
     }
 
     #[cfg(feature = "html-md")]
