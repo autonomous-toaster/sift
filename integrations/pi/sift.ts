@@ -28,7 +28,7 @@ function siftEnv(sessionId?: string): NodeJS.ProcessEnv {
 }
 
 function siftExec(cmd: string): string {
-	return execSync(`sift -c ${JSON.stringify(cmd)}`, {
+	return execSync(`sift -c ${shQuote(cmd)}`, {
 		env: siftEnv(),
 		encoding: "utf-8",
 		maxBuffer: 10 * 1024 * 1024,
@@ -105,7 +105,7 @@ export default function (pi: ExtensionAPI) {
 	const cwd = process.cwd();
 	const bashTool = createBashTool(cwd, {
 		spawnHook: ({ command, cwd, env }) => ({
-			command: `sift -c ${JSON.stringify(command)}`,
+			command: `sift -c ${shQuote(command)}`,
 			cwd,
 			env: { ...env, AI_SESSION: currentSessionId },
 		}),
