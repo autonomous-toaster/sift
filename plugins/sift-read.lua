@@ -12,7 +12,7 @@ return {
     execute = function(ctx, args, stdin)
         -- Parse args: [--fresh] <path> [<offset> [<limit>]]
         local parsed, err = sift.args.parse(args, {
-            flags = { fresh = { "--fresh" } },
+            flags = { fresh = { "--fresh" }, raw = { "--raw" } },
             args = {
                 { name = "path", required = true },
                 { name = "offset", type = "int" },
@@ -25,6 +25,7 @@ return {
         end
 
         local fresh = parsed.fresh or false
+        local raw = parsed.raw or false
         local path = parsed.path
         local raw_path = path
         local offset = parsed.offset
@@ -81,9 +82,16 @@ return {
 
             -- Extract text via xberg
             local text = sift.ext.xberg.extract(ctx, path, { format = "markdown" })
-            -- Compress via mdmin
-            if sift.ext.markdown ~= nil then
+            -- Compress via mdmin (skip if --raw)
+            if not raw and sift.ext.markdown ~= nil then
                 text = sift.ext.markdown.compress(ctx, text, { level = 2, code_blocks = "compress", dictionary = true })
+            end
+            -- Nudge agent that content was compressed
+            if not raw then
+                local nudge_args = ""
+                if offset then nudge_args = nudge_args .. " " .. offset end
+                if limit then nudge_args = nudge_args .. " " .. limit end
+                sift.nudge(ctx, "raw: 'sift-read --raw " .. path .. nudge_args .. "'")
             end
             -- Cache extracted text by file hash
             sift.cache.store_file(ctx, hash, text)
@@ -115,9 +123,13 @@ return {
             return { status = "error", output = "sift-read: " .. raw_path .. ": No such file or directory" }
         end
 
-        -- Compress markdown files via mdmin (level 2, preserve code blocks)
-        if sift.ext.markdown ~= nil and (path:match("%.md$") or path:match("%.markdown$")) then
+        -- Compress markdown files via mdmin (skip if --raw)
+        if not raw and sift.ext.markdown ~= nil and (path:match("%.md$") or path:match("%.markdown$")) then
             content = sift.ext.markdown.compress(ctx, content, { level = 2, code_blocks = "preserve", dictionary = true })
+            local nudge_args = ""
+            if offset then nudge_args = nudge_args .. " " .. offset end
+            if limit then nudge_args = nudge_args .. " " .. limit end
+            sift.nudge(ctx, "raw: 'sift-read --raw " .. path .. nudge_args .. "'")
         end
 
         local total_lines = #sift.str.split_lines(ctx, content)
