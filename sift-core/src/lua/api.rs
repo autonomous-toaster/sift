@@ -391,22 +391,17 @@ impl SiftLua {
         merge_stderr: bool,
     ) -> Result<Table> {
         let ctx = if let Some(key) = self.ctx_template_key.as_ref() {
-            let t: Table = self.lua.registry_value(key)?;
-            t.set("cmd_count", self.ctx.cmd_count.get())?;
-            t.set("command", cmd)?;
-            t.set("original_cmd", original_cmd)?;
-            t.set("merge_stderr", merge_stderr)?;
-            t
+            self.lua.registry_value(key)?
         } else {
             let t = self.lua.create_table()?;
             t.set("cwd", self.ctx.cwd_str.as_str())?;
             t.set("session_id", self.session_id_str.as_str())?;
-            t.set("cmd_count", self.ctx.cmd_count.get())?;
-            t.set("command", cmd)?;
-            t.set("original_cmd", original_cmd)?;
-            t.set("merge_stderr", merge_stderr)?;
             t
         };
+        ctx.set("cmd_count", self.ctx.cmd_count.get())?;
+        ctx.set("command", cmd)?;
+        ctx.set("original_cmd", original_cmd)?;
+        ctx.set("merge_stderr", merge_stderr)?;
         Ok(ctx)
     }
 

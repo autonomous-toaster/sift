@@ -208,6 +208,52 @@ fn try_combined_short_flags(
     Ok(true)
 }
 
+/// Handle a known long flag (--flag or --flag=value).
+fn handle_known_long_flag(
+    lua: &Lua,
+    entry: &FlagEntry,
+    inline_value: Option<&str>,
+    i: &mut usize,
+    args_len: usize,
+    result: &Table,
+    args: &Table,
+) -> Result<(), ParseError> {
+    if entry.flag_type == "boolean" {
+        result.set(entry.name.as_str(), true)?;
+    } else if let Some(ref val) = inline_value {
+        handle_value_flag(lua, result, entry, val)?;
+    } else {
+        *i += 1;
+        if *i > args_len {
+            return Err(missing_value_err(lua, &entry.name));
+        }
+        let val: String = args.get(*i)?;
+        handle_value_flag(lua, result, entry, &val)?;
+    }
+    Ok(())
+}
+
+/// Handle an unknown long flag.
+fn handle_unknown_long_flag(
+    inline_value: Option<&str>,
+    i: &mut usize,
+    args_len: usize,
+    allow_unknown: bool,
+    args: &Table,
+) -> Result<bool, ParseError> {
+    if !allow_unknown {
+        return Err(ParseError::Passthrough);
+    }
+    if inline_value.is_none() && *i < args_len {
+        let next: String = args.get(*i + 1)?;
+        if !next.starts_with('-') {
+            *i += 1;
+        }
+    }
+    *i += 1;
+    Ok(true)
+}
+
 /// Handle a long flag (--flag or --flag=value).
 /// Returns true if the argument was handled.
 fn handle_long_flag(
@@ -228,34 +274,12 @@ fn handle_long_flag(
     let inline_value = eq_pos.map(|pos| arg[pos + 1..].to_string());
 
     if let Some(entry) = lookup_flag(flag_map, &alias) {
-        if entry.flag_type == "boolean" {
-            result.set(entry.name.as_str(), true)?;
-        } else if let Some(ref val) = inline_value {
-            handle_value_flag(lua, result, entry, val)?;
-        } else {
-            *i += 1;
-            if *i > args_len {
-                return Err(missing_value_err(lua, &alias));
-            }
-            let val: String = args.get(*i)?;
-            handle_value_flag(lua, result, entry, &val)?;
-        }
+        handle_known_long_flag(lua, entry, inline_value.as_deref(), i, args_len, result, args)?;
         *i += 1;
         return Ok(true);
     }
 
-    // Unknown long flag
-    if !allow_unknown {
-        return Err(ParseError::Passthrough);
-    }
-    if inline_value.is_none() && *i < args_len {
-        let next: String = args.get(*i + 1)?;
-        if !next.starts_with('-') {
-            *i += 1;
-        }
-    }
-    *i += 1;
-    Ok(true)
+    handle_unknown_long_flag(inline_value.as_deref(), i, args_len, allow_unknown, args)
 }
 
 /// Handle a short flag (-f or -f value).
