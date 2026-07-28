@@ -189,6 +189,18 @@ fn load_builtin_plugins(lua: &mut SiftLua) -> Result<()> {
 }
 
 /// Load user plugins from `plugins/`, `~/.config/sift/plugins/*.lua` and `SIFT_PLUGINS`.
+/// Load plugins from SIFT_PLUGINS environment variable.
+fn load_plugins_from_env(lua: &mut SiftLua) {
+    if let Ok(extra) = std::env::var("SIFT_PLUGINS") {
+        for path in extra.split(':') {
+            let dir = PathBuf::from(path);
+            if dir.is_dir() {
+                load_plugins_from_dir(lua, &dir);
+            }
+        }
+    }
+}
+
 fn load_user_plugins(lua: &mut SiftLua) {
     // Scan top-level plugins/ directory (shipped optional plugins)
     let project_plugins = std::path::PathBuf::from("plugins");
@@ -203,14 +215,7 @@ fn load_user_plugins(lua: &mut SiftLua) {
         }
     }
     // Scan SIFT_PLUGINS env var
-    if let Ok(extra) = std::env::var("SIFT_PLUGINS") {
-        for path in extra.split(':') {
-            let dir = PathBuf::from(path);
-            if dir.is_dir() {
-                load_plugins_from_dir(lua, &dir);
-            }
-        }
-    }
+    load_plugins_from_env(lua);
 }
 
 /// Load all `.lua` files from a directory as plugins.
