@@ -70,6 +70,9 @@ impl SiftLua {
         // Cache the execute function to avoid table lookup on every dispatch
         let execute: mlua::Function = plugin_table.get("execute")?;
 
+        // Read optional append_prompt for agent system prompt
+        let append_prompt: Option<String> = plugin_table.get("append_prompt").ok();
+
         // Store the plugin table reference
         let key = self.lua.create_registry_value(plugin_table)?;
         let execute_fn = self.lua.create_registry_value(execute)?;
@@ -79,6 +82,7 @@ impl SiftLua {
             priority,
             table: key,
             execute_fn,
+            append_prompt,
         });
 
         // Sort by: longest pattern first (use first pattern for sorting), then higher priority
@@ -189,7 +193,7 @@ impl SiftLua {
         let args: Vec<String> = parts[1..].to_vec();
 
         // Handle file redirects
-        self.dispatch_with_redirect(name, &args, stdin)
+        self.dispatch_with_redirect(name, &args, stdin, full_cmd)
     }
 
     /// Try pipeline optimization, returning `Some(result)` if the last segment matches a plugin.
@@ -219,14 +223,44 @@ impl SiftLua {
 
         let plugin = self.find_plugin(last_name, &last_args);
         if plugin.is_none() {
-            return Ok(None);
+            // No matching plugin for the last segment: dispatch the full pipeline
+            // through the shell plugin (__default__) to preserve user overridability.
+            let full_pipeline = segments.join(" | ");
+            return Ok(Some(self.dispatch(
+                &full_pipeline,
+                &[],
+                None,
+                false,
+                &full_pipeline,
+            )?));
         }
 
         // Skip wildcard plugins (pattern = "*") — they're fallbacks, not pipeline targets.
         // Wildcard plugins like rtk.lua are designed for single-command delegation,
-        // not for processing piped input. Let the full pipeline run in bash instead.
+        // not for processing piped input. Run the full pipeline in bash instead.
         if plugin.unwrap().patterns.first().map(String::as_str) == Some("*") {
-            return Ok(None);
+            let full_pipeline = segments.join(" | ");
+            let bash_path = find_real_bash();
+            let mut cmd = std::process::Command::new(&bash_path);
+            cmd.arg("-c").arg(&full_pipeline);
+            apply_bash_env(&mut cmd);
+            let output = cmd
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .map_err(|e| mlua::Error::external(format!("pipeline spawn: {e}")))?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let exit_code = output.status.code().unwrap_or(1);
+            let combined = format!("{stdout}{stderr}");
+            if !stdout.is_empty() {
+                print!("{stdout}");
+            }
+            if !stderr.is_empty() {
+                let _ = std::io::stderr().write_all(stderr.as_bytes());
+            }
+            let _ = std::io::stdout().flush();
+            return Ok(Some((combined, exit_code, "pipeline-bash".to_string())));
         }
 
         // Run preceding segments in bash, pipe to plugin
@@ -252,13 +286,24 @@ impl SiftLua {
             )));
         }
 
+        // Forward stderr from preceding command to the user even on success
+        if !stderr.is_empty() {
+            let _ = std::io::stderr().write_all(stderr.as_bytes());
+        }
+
         // Dispatch last segment to plugin with preceding stdout as stdin
         let reader = StdinReader::from_string(stdout);
         let ud = self
             .lua
             .create_userdata(reader)
             .map_err(|e| mlua::Error::external(format!("create userdata: {e}")))?;
-        let result = self.dispatch(last_name, &last_args, Some(Value::UserData(ud)), false)?;
+        let result = self.dispatch(
+            last_name,
+            &last_args,
+            Some(Value::UserData(ud)),
+            false,
+            last_segment,
+        )?;
         Ok(Some(result))
     }
 
@@ -268,6 +313,7 @@ impl SiftLua {
         name: &str,
         args: &[String],
         stdin: Option<Value>,
+        original_cmd: &str,
     ) -> Result<(String, i32, String)> {
         // Handle fd redirects (2>&1, 1>&2, etc.) — strip from args, set merge_stderr
         let (clean_args, merge_stderr) = parse_fd_redirects(args);
@@ -292,6 +338,7 @@ impl SiftLua {
                             &clean_args,
                             Some(Value::UserData(ud)),
                             merge_stderr,
+                            original_cmd,
                         );
                     }
                     Err(e) => {
@@ -314,7 +361,7 @@ impl SiftLua {
                 clean_args.remove(pos);
                 clean_args.remove(pos);
                 let (output, exit_code, plugin) =
-                    self.dispatch(name, &clean_args, stdin, merge_stderr)?;
+                    self.dispatch(name, &clean_args, stdin, merge_stderr, original_cmd)?;
                 if exit_code == 0 {
                     if append {
                         let _ = std::fs::OpenOptions::new()
@@ -330,7 +377,7 @@ impl SiftLua {
             }
         }
 
-        self.dispatch(name, args, stdin, merge_stderr)
+        self.dispatch(name, args, stdin, merge_stderr, original_cmd)
     }
 
     /// Dispatch a command to the best matching plugin.
@@ -342,6 +389,7 @@ impl SiftLua {
         args: &[String],
         stdin: Option<Value>,
         merge_stderr: bool,
+        original_cmd: &str,
     ) -> Result<(String, i32, String)> {
         // Record dispatch start time for exec_time_ms measurement
         if let Ok(mut start) = self.dispatch_start.lock() {
@@ -357,6 +405,7 @@ impl SiftLua {
             let t: Table = self.lua.registry_value(key)?;
             t.set("cmd_count", self.ctx.cmd_count.get())?;
             t.set("command", cmd)?;
+            t.set("original_cmd", original_cmd)?;
             t.set("merge_stderr", merge_stderr)?;
             t
         } else {
@@ -365,6 +414,7 @@ impl SiftLua {
             t.set("session_id", self.session_id_str.as_str())?;
             t.set("cmd_count", self.ctx.cmd_count.get())?;
             t.set("command", cmd)?;
+            t.set("original_cmd", original_cmd)?;
             t.set("merge_stderr", merge_stderr)?;
             t
         };
@@ -405,7 +455,7 @@ impl SiftLua {
 
         if status == "passthrough" {
             let (passthrough_output, passthrough_exit_code, _) =
-                Self::execute_passthrough(cmd, args, passthrough_stdin)?;
+                Self::execute_passthrough(cmd, args, passthrough_stdin, original_cmd)?;
             let raw = i64::try_from(passthrough_output.len()).unwrap_or(i64::MAX);
             self.record_conversation(
                 cmd,
@@ -448,7 +498,7 @@ impl SiftLua {
                 let count = recent.iter().filter(|(k, _)| k == &key).count();
                 if count >= 3 {
                     msg = format!(
-                            "{msg}\n[sift] (this will keep returning the same result until the file changes on disk)",
+                            "{msg}\n[nudge] (this will keep returning the same result until the file changes on disk)",
                         );
                 }
             }
@@ -612,9 +662,24 @@ impl SiftLua {
         let mut text = String::new();
         for n in &nudges {
             use std::fmt::Write;
-            let _ = write!(text, "\n[sift] {n}");
+            let _ = write!(text, "\n[nudge] {n}");
         }
         text
+    }
+
+    /// Collect all non-empty `append_prompt` strings from loaded plugins, deduplicated by plugin name.
+    pub fn collect_append_prompts(&self) -> Vec<&str> {
+        let mut seen = std::collections::HashSet::new();
+        self.plugins
+            .iter()
+            .filter_map(|p| {
+                let name = p.patterns.first().map_or("", String::as_str);
+                if name.is_empty() || !seen.insert(name) {
+                    return None;
+                }
+                p.append_prompt.as_deref().filter(|p| !p.is_empty())
+            })
+            .collect()
     }
 
     /// Handle `status = "unchanged"` result: emit bypass nudge and return message.
@@ -629,12 +694,20 @@ impl SiftLua {
         cmd: &str,
         args: &[String],
         stdin: Option<String>,
+        original_cmd: &str,
     ) -> Result<(String, i32, String)> {
-        let full_cmd = if args.is_empty() {
-            cmd.to_string()
+        // Use the original command string to preserve shell semantics
+        // (variable expansion, command substitution, etc.)
+        // Only fall back to reconstruction if original_cmd is empty.
+        let full_cmd = if original_cmd.is_empty() {
+            if args.is_empty() {
+                cmd.to_string()
+            } else {
+                let quoted: Vec<String> = args.iter().map(|a| sh_quote(a)).collect();
+                format!("{} {}", cmd, quoted.join(" "))
+            }
         } else {
-            let quoted: Vec<String> = args.iter().map(|a| sh_quote(a)).collect();
-            format!("{} {}", cmd, quoted.join(" "))
+            original_cmd.to_string()
         };
         // Use exec_command to execute the command directly, forwarding stdin
         let (stdout, stderr, exit_code) =
@@ -644,27 +717,77 @@ impl SiftLua {
     }
 }
 
+/// Split a shell command string on pipe (`|`) characters, respecting quotes and escapes.
+///
+/// Only splits on `|` that appear outside of:
+/// - Single-quoted strings (`'...'`)
+/// - Double-quoted strings (`"..."`)
+/// - After a backslash escape (`\|`)
+///
+/// Also handles `||` (logical OR) correctly — does not split on it.
 pub fn split_pipeline(input: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0;
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let mut i = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
     while i < len {
-        if chars[i] == '|' && i + 1 < len && chars[i + 1] == '|' {
-            // Skip || (logical OR)
-            i += 2;
-        } else if chars[i] == '|' {
-            segments.push(input[start..i].trim());
-            start = i + 1;
+        let c = chars[i];
+
+        if escaped {
+            // After backslash: consume any character literally
+            escaped = false;
             i += 1;
-        } else {
-            i += 1;
+            continue;
         }
+
+        if c == '\\' && !in_single_quote {
+            // Backslash escape (not effective inside single quotes in shell)
+            escaped = true;
+            i += 1;
+            continue;
+        }
+
+        if c == '\'' && !in_double_quote {
+            // Single quote toggle (literal inside double quotes)
+            in_single_quote = !in_single_quote;
+            i += 1;
+            continue;
+        }
+
+        if c == '"' && !in_single_quote {
+            // Double quote toggle
+            in_double_quote = !in_double_quote;
+            i += 1;
+            continue;
+        }
+
+        if !in_single_quote && !in_double_quote {
+            if c == '|' && i + 1 < len && chars[i + 1] == '|' {
+                // Skip || (logical OR) — not a pipe
+                i += 2;
+                continue;
+            }
+
+            if c == '|' {
+                segments.push(input[start..i].trim());
+                start = i + 1;
+                i += 1;
+                continue;
+            }
+        }
+
+        i += 1;
     }
+
     if start < len {
         segments.push(input[start..].trim());
     }
+
     segments
 }
 

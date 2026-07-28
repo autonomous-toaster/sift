@@ -80,6 +80,8 @@ pub(crate) struct PluginEntry {
     table: mlua::RegistryKey,
     /// Cached execute function reference (avoids table lookup on every dispatch).
     execute_fn: mlua::RegistryKey,
+    /// Optional prompt appended to agent system prompt via sift --append-prompt.
+    pub(crate) append_prompt: Option<String>,
 }
 
 impl SiftLua {

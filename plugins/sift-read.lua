@@ -8,6 +8,8 @@ return {
     name = "sift-read",
     priority = 0,
     pattern = "sift-read",
+    append_prompt = "File contents may be compressed or extracted. " ..
+        "Use sift-read --raw <path> for original content.",
 
     execute = function(ctx, args, stdin)
         -- Parse args: [--fresh] <path> [<offset> [<limit>]]
@@ -75,7 +77,7 @@ return {
                 local display_name = path:match("([^/]+)$") or path
                 return {
                     status = "unchanged",
-                    message = "[sift] " .. display_name .. " unchanged (cached)\n      (bypass if stale: sift-read --fresh " .. path .. ")",
+                    message = "[nudge] " .. display_name .. " unchanged (cached)\n      (bypass if stale: sift-read --fresh " .. path .. ")",
                     raw_bytes = stat.size
                 }
             end
@@ -108,7 +110,7 @@ return {
         -- Binary document without xberg: return helpful message
         if is_binary_document then
             local display_name = path:match("([^/]+)$") or path
-            local msg = string.format("[sift] %s is a binary document (%s). Install sift with --features xberg to extract text automatically.\n      (fallback: command cat %s)", display_name, mime, path)
+            local msg = string.format("[nudge] %s is a binary document (%s). Install sift with --features xberg to extract text automatically.\n      (fallback: command cat %s)", display_name, mime, path)
             return {
                 status = "handled",
                 output = msg,
@@ -152,9 +154,9 @@ return {
                 if offset or limit then
                     local msg
                     if range_start == range_end then
-                        msg = string.format("[sift] %s line %d unchanged (cached)\n      (bypass if stale: sift-read --fresh %s %d)", display_name, range_start, path, range_start)
+                        msg = string.format("[nudge] %s line %d unchanged (cached)\n      (bypass if stale: sift-read --fresh %s %d)", display_name, range_start, path, range_start)
                     else
-                        msg = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: sift-read --fresh %s %d %d)", display_name, range_start, range_end, path, range_start, range_end - range_start + 1)
+                        msg = string.format("[nudge] %s lines %d-%d unchanged (cached)\n      (bypass if stale: sift-read --fresh %s %d %d)", display_name, range_start, range_end, path, range_start, range_end - range_start + 1)
                     end
                     return {
                         status = "unchanged",
@@ -164,7 +166,7 @@ return {
                 end
                 return {
                     status = "unchanged",
-                    message = "[sift] " .. display_name .. " unchanged (cached)\n      (bypass if stale: sift-read --fresh " .. path .. ")",
+                    message = "[nudge] " .. display_name .. " unchanged (cached)\n      (bypass if stale: sift-read --fresh " .. path .. ")",
                     raw_bytes = stat.size
                 }
             end

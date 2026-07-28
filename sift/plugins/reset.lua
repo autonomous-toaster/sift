@@ -15,13 +15,13 @@ return {
         if had_cache then
             return {
                 status = "handled",
-                output = "[sift] ok (cleared)\n",
+                output = "[nudge] ok (cleared)\n",
                 exit_code = 0
             }
         else
             return {
                 status = "handled",
-                output = "[sift] ok (nothing to clear)\n",
+                output = "[nudge] ok (nothing to clear)\n",
                 exit_code = 0
             }
         end

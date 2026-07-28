@@ -7,6 +7,8 @@ return {
     name = "cat",
     priority = 0,
     pattern = "cat",
+    append_prompt = "Markdown files may be compressed via mdmin. " ..
+        "Follow [nudge] raw: hints to get the original content.",
 
     execute = function(ctx, args, stdin)
         -- Handle piped stdin (supports both string and StdinReader)
@@ -21,7 +23,7 @@ return {
                 return {
                     status = "unchanged",
                     fingerprint = cache_key,
-                    message = "[sift] piped content unchanged since last read"
+                    message = "[nudge] piped content unchanged since last read"
                 }
             end
 
@@ -79,7 +81,7 @@ return {
             local display_name = path:match("([^/]+)$") or args[1]
             return {
                 status = "unchanged",
-                message = "[sift] " .. display_name .. " unchanged (cached)\n      (bypass if stale: command cat " .. path .. ")",
+                message = "[nudge] " .. display_name .. " unchanged (cached)\n      (bypass if stale: command cat " .. path .. ")",
                 raw_bytes = stat.size
             }
         end
@@ -90,7 +92,7 @@ return {
             return {
                 status = "unchanged",
                 fingerprint = cache_key,
-                message = "[sift] piped content unchanged (cached)"
+                message = "[nudge] piped content unchanged (cached)"
             }
         end
 

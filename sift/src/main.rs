@@ -30,6 +30,10 @@ struct Cli {
     #[arg(long)]
     shell: bool,
 
+    /// Output all append_prompt strings from loaded plugins and exit.
+    #[arg(long)]
+    append_prompt: bool,
+
     /// Subcommands.
     #[command(subcommand)]
     command: Option<CliCommand>,
@@ -154,6 +158,15 @@ async fn main() -> Result<()> {
     // Load user plugins from filesystem
     load_user_plugins(&mut lua);
 
+    // Handle --append-prompt: output prompts and exit
+    if cli.append_prompt {
+        let prompts = lua.collect_append_prompts();
+        for p in prompts {
+            println!("{p}");
+        }
+        return Ok(());
+    }
+
     let exit_code = match cli.exec {
         Some(cmd) => agent_mode(&lua, &cmd)?,
         None => {
@@ -162,6 +175,8 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Flush stdout before exit to ensure all output is visible
+    let _ = io::stdout().flush();
     std::process::exit(exit_code);
 }
 
@@ -218,6 +233,9 @@ fn load_plugins_from_dir(lua: &mut SiftLua, dir: &PathBuf) {
 /// Agent mode: execute a command and output the result.
 fn agent_mode(lua: &SiftLua, cmd: &str) -> Result<i32> {
     let (_output, exit_code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>)?;
+
+    // Flush stdout to ensure all output from dispatch is visible before exit
+    let _ = io::stdout().flush();
 
     Ok(exit_code)
 }

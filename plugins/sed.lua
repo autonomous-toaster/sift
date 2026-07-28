@@ -61,7 +61,7 @@ return {
             local display_name = path:match("([^/]+)$") or range.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command sed -n '%d,%dp' %s)", display_name, range.start, range_end, range.start, range_end, path),
+                message = string.format("[nudge] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command sed -n '%d,%dp' %s)", display_name, range.start, range_end, range.start, range_end, path),
                 raw_bytes = stat.size
             }
         end
@@ -69,7 +69,7 @@ return {
             local display_name = path:match("([^/]+)$") or range.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command sed -n '%d,%dp' %s)", display_name, range.start, range_end, range.start, range_end, path),
+                message = string.format("[nudge] %s lines %d-%d unchanged (cached)\n      (bypass if stale: command sed -n '%d,%dp' %s)", display_name, range.start, range_end, range.start, range_end, path),
                 raw_bytes = stat.size
             }
         end

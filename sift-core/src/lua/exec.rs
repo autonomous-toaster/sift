@@ -105,8 +105,17 @@ pub(crate) fn exec_command(
             .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).to_string());
         let exit_code = output.status.code().unwrap_or(1);
         if !silent {
-            let _ = std::io::stdout().write(stdout.as_bytes());
-            let _ = std::io::stderr().write(stderr.as_bytes());
+            // Write stdout and stderr, handling EPIPE gracefully.
+            // EPIPE occurs when the reader (e.g., head) closes the pipe early.
+            // This is not an error — just stop writing.
+            if let Err(e) = std::io::stdout().write_all(stdout.as_bytes()) {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    let _ = std::io::stderr().write(b"sift: stdout write error: ");
+                    let _ = std::io::stderr().write(e.to_string().as_bytes());
+                    let _ = std::io::stderr().write(b"\n");
+                }
+            }
+            let _ = std::io::stderr().write_all(stderr.as_bytes());
         }
         return Ok((stdout, stderr, exit_code));
     }

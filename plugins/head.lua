@@ -42,7 +42,7 @@ return {
             local display_name = path:match("([^/]+)$") or parsed.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines 1-%d unchanged (cached)\n      (bypass if stale: command head -n %d %s)", display_name, range_end, range_end, path),
+                message = string.format("[nudge] %s lines 1-%d unchanged (cached)\n      (bypass if stale: command head -n %d %s)", display_name, range_end, range_end, path),
                 raw_bytes = stat.size
             }
         end
@@ -50,7 +50,7 @@ return {
             local display_name = path:match("([^/]+)$") or parsed.path
             return {
                 status = "unchanged",
-                message = string.format("[sift] %s lines 1-%d unchanged (cached)\n      (bypass if stale: command head -n %d %s)", display_name, range_end, range_end, path),
+                message = string.format("[nudge] %s lines 1-%d unchanged (cached)\n      (bypass if stale: command head -n %d %s)", display_name, range_end, range_end, path),
                 raw_bytes = stat.size
             }
         end

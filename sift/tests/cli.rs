@@ -41,3 +41,34 @@ fn test_default_repl() {
     let mut cmd = Command::cargo_bin("sift").unwrap();
     cmd.write_stdin("exit\n").assert().success();
 }
+
+#[test]
+fn test_agent_mode_failed_pipeline() {
+    // When the preceding command in a pipeline fails, stderr+stdout should be visible
+    // The shell plugin emits a nudge with the path to the saved output
+    let mut cmd = Command::cargo_bin("sift").unwrap();
+    cmd.arg("-c").arg("echo hello | grep nonexistent");
+    cmd.assert()
+        .code(1)
+        .stdout(predicates::str::contains("[nudge] raw:"));
+}
+
+#[test]
+fn test_agent_mode_pipeline_with_variable() {
+    // Variable expansion should work in piped commands
+    let mut cmd = Command::cargo_bin("sift").unwrap();
+    cmd.arg("-c").arg("echo \"$HOME\" | head");
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("/"));
+}
+
+#[test]
+fn test_agent_mode_epipe_resilience() {
+    // head should not cause EPIPE crash when reading large input
+    let mut cmd = Command::cargo_bin("sift").unwrap();
+    cmd.arg("-c").arg("seq 1 10000 | head -5");
+    cmd.assert()
+        .success()
+        .stdout(predicates::str::contains("1\n2\n3\n4\n5"));
+}

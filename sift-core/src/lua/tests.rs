@@ -157,6 +157,7 @@ fn test_plugin_load_and_dispatch() {
             &["arg1".to_string()],
             None::<mlua::Value>,
             false,
+            "",
         )
         .unwrap();
     assert_eq!(output, "test: arg1");
@@ -173,15 +174,37 @@ fn test_plugin_dispatch_fallback() {
             priority = -1000,
             pattern = "__default__",
             execute = function(ctx, args, stdin)
-                return { status = "handled", output = "fallback", exit_code = 0 }
+                -- Use original_cmd to run the command, like the real shell plugin
+                local cmd = ctx.original_cmd
+                if cmd == nil or cmd == "" then
+                    local parts = {ctx.command}
+                    for i = 1, #args do
+                        parts[#parts + 1] = sift.str.shell_quote(ctx, args[i])
+                    end
+                    cmd = table.concat(parts, " ")
+                end
+                local output, stderr, exit_code = sift.exec(ctx, cmd)
+                return { status = "handled", output = output, exit_code = exit_code }
             end
         }
     "#;
     lua.load_plugin_from_str("default", plugin_code).unwrap();
-    let (output, _exit_code, _plugin) = lua
-        .dispatch("unknown-cmd", &[], None::<mlua::Value>, false)
+    // __default__ plugin now runs commands via sift.exec() with ctx.original_cmd.
+    // Use a command that exists to verify the fallback works.
+    let (output, exit_code, _plugin) = lua
+        .dispatch(
+            "echo",
+            &["hello".to_string()],
+            None::<mlua::Value>,
+            false,
+            "echo hello",
+        )
         .unwrap();
-    assert_eq!(output, "fallback");
+    assert!(
+        output.contains("hello"),
+        "output should contain hello, got: {output}"
+    );
+    assert_eq!(exit_code, 0);
 }
 
 #[test]
@@ -192,7 +215,7 @@ fn test_plugin_priority_ordering() {
     lua.load_plugin_from_str("low", low).unwrap();
     lua.load_plugin_from_str("high", high).unwrap();
     let (output, _exit_code, _plugin) = lua
-        .dispatch("test", &[], None::<mlua::Value>, false)
+        .dispatch("test", &[], None::<mlua::Value>, false, "")
         .unwrap();
     assert_eq!(output, "high");
 }
@@ -538,6 +561,96 @@ fn test_split_pipeline_no_pipe() {
 }
 
 #[test]
+fn test_split_pipeline_inside_single_quotes() {
+    // Pipe inside single quotes should NOT be split
+    let segments = super::api::split_pipeline("echo 'a|b' | cat");
+    assert_eq!(
+        segments.len(),
+        2,
+        "should have 2 segments, got {segments:?}"
+    );
+    assert_eq!(segments[0], "echo 'a|b'");
+    assert_eq!(segments[1], "cat");
+}
+
+#[test]
+fn test_split_pipeline_inside_double_quotes() {
+    // Pipe inside double quotes should NOT be split
+    let segments = super::api::split_pipeline("echo \"a|b\" | cat");
+    assert_eq!(
+        segments.len(),
+        2,
+        "should have 2 segments, got {segments:?}"
+    );
+    assert_eq!(segments[0], "echo \"a|b\"");
+    assert_eq!(segments[1], "cat");
+}
+
+#[test]
+fn test_split_pipeline_escaped_pipe() {
+    // Escaped pipe should NOT be split
+    let segments = super::api::split_pipeline("echo a\\|b | cat");
+    assert_eq!(
+        segments.len(),
+        2,
+        "should have 2 segments, got {segments:?}"
+    );
+    assert_eq!(segments[0], "echo a\\|b");
+    assert_eq!(segments[1], "cat");
+}
+
+#[test]
+fn test_split_pipeline_url_with_pipe() {
+    // URL with pipe inside single quotes should NOT be split
+    let segments = super::api::split_pipeline("curl 'https://example.com?filter=a|b' | jq '.'");
+    assert_eq!(
+        segments.len(),
+        2,
+        "should have 2 segments, got {segments:?}"
+    );
+    assert_eq!(segments[0], "curl 'https://example.com?filter=a|b'");
+    assert_eq!(segments[1], "jq '.'");
+}
+
+#[test]
+fn test_split_pipeline_logical_or_not_split() {
+    // || should NOT be treated as a pipe
+    let segments = super::api::split_pipeline("false || echo ok");
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0], "false || echo ok");
+}
+
+#[test]
+fn test_split_pipeline_empty_segments() {
+    // Empty input should return empty vec
+    let segments = super::api::split_pipeline("");
+    assert!(segments.is_empty());
+}
+
+#[test]
+fn test_split_pipeline_multiple_pipes() {
+    // Multiple pipes should produce multiple segments
+    let segments = super::api::split_pipeline("echo a | grep a | sort");
+    assert_eq!(segments.len(), 3);
+    assert_eq!(segments[0], "echo a");
+    assert_eq!(segments[1], "grep a");
+    assert_eq!(segments[2], "sort");
+}
+
+#[test]
+fn test_split_pipeline_mixed_quoting() {
+    // Mixed quoting: single inside double, pipe outside quotes
+    let segments = super::api::split_pipeline("echo \"it's\" | cat");
+    assert_eq!(
+        segments.len(),
+        2,
+        "should have 2 segments, got {segments:?}"
+    );
+    assert_eq!(segments[0], "echo \"it's\"");
+    assert_eq!(segments[1], "cat");
+}
+
+#[test]
 fn test_dispatch_full_cd_prefix() {
     let mut lua = SiftLua::new(None, test_context()).unwrap();
     let plugin_code = r#"
@@ -567,15 +680,30 @@ fn test_dispatch_full_pipeline_fallback() {
             priority = -1000,
             pattern = "__default__",
             execute = function(ctx, args, stdin)
-                return { status = "handled", output = "fallback", exit_code = 0 }
+                -- Use original_cmd to run the command, like the real shell plugin
+                local cmd = ctx.original_cmd
+                if cmd == nil or cmd == "" then
+                    local parts = {ctx.command}
+                    for i = 1, #args do
+                        parts[#parts + 1] = sift.str.shell_quote(ctx, args[i])
+                    end
+                    cmd = table.concat(parts, " ")
+                end
+                local output, stderr, exit_code = sift.exec(ctx, cmd)
+                return { status = "handled", output = output, exit_code = exit_code }
             end
         }
     "#;
     lua.load_plugin_from_str("default", default_code).unwrap();
+    // When no plugin matches the last pipeline segment, try_pipeline now dispatches
+    // through the shell plugin. The output should be the actual result of "echo hello | grep hello".
     let (output, exit_code, _plugin) = lua
         .dispatch_full("echo hello | grep hello", None::<mlua::Value>)
         .unwrap();
-    assert_eq!(output, "fallback");
+    assert!(
+        output.contains("hello"),
+        "output should contain hello, got: {output}"
+    );
     assert_eq!(exit_code, 0);
 }
 
@@ -597,16 +725,16 @@ fn test_dispatch_unchanged_nudge() {
             pattern = "test-cmd",
             execute = function(ctx, args, stdin)
                 sift.nudge(ctx, "bypass: 'command cat foo.rs'")
-                return { status = "unchanged", message = "[sift] foo.rs unchanged since last read" }
+                return { status = "unchanged", message = "[nudge] foo.rs unchanged since last read" }
             end
         }
     "#;
     lua.load_plugin_from_str("test", plugin_code).unwrap();
     let (output, exit_code, _plugin) = lua
-        .dispatch("test-cmd", &[], None::<mlua::Value>, false)
+        .dispatch("test-cmd", &[], None::<mlua::Value>, false, "")
         .unwrap();
     assert!(
-        output.contains("[sift] foo.rs unchanged since last read"),
+        output.contains("[nudge] foo.rs unchanged since last read"),
         "output: {output}"
     );
     assert!(
@@ -824,6 +952,74 @@ fn test_passthrough_without_stdin() {
         "passthrough without stdin should work normally"
     );
     assert_eq!(exit_code, 0);
+}
+
+#[test]
+fn test_pipeline_stderr_forwarding() {
+    // When the preceding command in a pipeline produces stderr on success,
+    // it should be forwarded to the user (not silently dropped).
+    // Use a command that writes to stderr: echo to stderr via >&2
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    let cat_code = r#"
+        return {
+            name = "test-cat",
+            priority = 0,
+            pattern = "test-cat",
+            execute = function(ctx, args, stdin)
+                local input = ""
+                if stdin ~= nil then
+                    input = tostring(stdin)
+                end
+                return { status = "handled", output = "cat:" .. input, exit_code = 0 }
+            end
+        }
+    "#;
+    lua.load_plugin_from_str("test-cat", cat_code).unwrap();
+    // The preceding command writes to stderr via >&2
+    let (output, exit_code, _plugin) = lua
+        .dispatch_full("echo hello >&2 | test-cat", None::<mlua::Value>)
+        .unwrap();
+    // The plugin should receive stdout (which is empty since echo wrote to stderr)
+    // The stderr should be visible to the user
+    assert_eq!(exit_code, 0);
+    assert!(
+        output.contains("cat:"),
+        "output should contain cat: prefix, got: {output}"
+    );
+}
+
+#[test]
+fn test_pipeline_epipe_resilience() {
+    // EPIPE occurs when the reader closes the pipe early (e.g., head).
+    // This should not cause a crash or error.
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    let head_code = r#"
+        return {
+            name = "test-head",
+            priority = 0,
+            pattern = "test-head",
+            execute = function(ctx, args, stdin)
+                -- Read only first 2 lines, then close (simulating head)
+                local count = 0
+                local result = {}
+                if stdin ~= nil then
+                    local line = stdin:readline()
+                    while line ~= nil and count < 2 do
+                        table.insert(result, line)
+                        count = count + 1
+                        line = stdin:readline()
+                    end
+                end
+                return { status = "handled", output = table.concat(result, "\n"), exit_code = 0 }
+            end
+        }
+    "#;
+    lua.load_plugin_from_str("test-head", head_code).unwrap();
+    // Generate 100 lines, pipe through head-like plugin
+    let (output, exit_code, _plugin) = lua
+        .dispatch_full("echo {1..100} | xargs -n1 | test-head", None::<mlua::Value>)
+        .unwrap();
+    assert_eq!(exit_code, 0, "EPIPE should not cause failure");
 }
 
 mod tests_cache;

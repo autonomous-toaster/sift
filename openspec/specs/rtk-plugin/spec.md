@@ -2,18 +2,28 @@
 
 ## Purpose
 
-Provide a built-in rtk.lua plugin that delegates matching commands (docker, podman, kubectl, etc.) to the rtk binary.
+Provide a built-in rtk.lua plugin that delegates matching commands (ls, git, docker, etc.) to the rtk binary for compact output.
 
 ## Requirements
 
-### Requirement: rtk uses wildcard pattern
+### Requirement: rtk uses specific command patterns
 
-The rtk.lua plugin SHALL use pattern `"*"` (wildcard) instead of a hardcoded list of command names.
+The rtk.lua plugin SHALL use a list of specific command patterns instead of a wildcard `"*"`. The list SHALL match the commands shown in `rtk --help`.
 
-#### Scenario: Wildcard pattern set
+#### Scenario: Pattern list set
 
 - **WHEN** rtk.lua is loaded
-- **THEN** its pattern SHALL be `"*"`
+- **THEN** its pattern SHALL be a list of specific commands (e.g., `ls`, `git`, `docker`, etc.)
+
+#### Scenario: rtk handles git
+
+- **WHEN** the agent runs `git status`
+- **THEN** the rtk plugin SHALL match and delegate to `rtk git status`
+
+#### Scenario: rtk does not handle sed
+
+- **WHEN** the agent runs `sed -i 's/foo/bar/' file`
+- **THEN** the rtk plugin SHALL NOT match, and the command SHALL fall through to the shell plugin
 
 ### Requirement: rtk falls through on failure
 

@@ -82,10 +82,15 @@ return {
         local result = string.format("%d function(s) exceed CRAP threshold %d:\n", #crappy, threshold)
         for i = 1, #crappy do
             local e = crappy[i]
-            local short_file = e.file:match("/([^/]+)$") or e.file
+            local short_file = e.file:match("/([^/]+)$") or e.file or ""
+            local crap = tonumber(e.crap) or 0
+            local cyclomatic = tonumber(e.cyclomatic) or 0
+            local coverage = tonumber(e.coverage) or 0
+            local func_name = tostring(e["function"]) or ""
+            local line = tonumber(e.line) or 0
             result = result .. string.format(
                 "  CRAP=%.0f  cyclomatic=%.0f  coverage=%.0f%%  %s  %s:%d\n",
-                e.crap, e.cyclomatic or 0, e.coverage or 0, e["function"], short_file, e.line
+                crap, cyclomatic, coverage, func_name, short_file, line
             )
         end
 

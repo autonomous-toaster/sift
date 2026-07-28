@@ -69,6 +69,7 @@ return {
             local raw_output = table.concat(lines, "\n")
             -- Pass through shortest() — non-JSON input returns unchanged
             local compressed = sift.json.shortest(ctx, raw_output, { toon = true })
+            sift.nudge(ctx, "command: '" .. ctx.original_cmd .. "'")
             return {
                 status = "handled",
                 output = compressed,
@@ -79,6 +80,7 @@ return {
 
         -- Default (including -c): compress with shortest format
         local compressed = sift.json.shortest(ctx, result, { toon = true })
+        sift.nudge(ctx, "command: '" .. ctx.original_cmd .. "'")
         return {
             status = "handled",
             output = compressed,
