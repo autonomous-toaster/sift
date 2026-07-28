@@ -214,17 +214,22 @@ fn load_user_plugins(lua: &mut SiftLua) {
 }
 
 /// Load all `.lua` files from a directory as plugins.
+/// Load a single plugin file.
+fn load_plugin_file(lua: &mut SiftLua, path: &std::path::Path) {
+    if let Ok(code) = std::fs::read_to_string(path) {
+        let name = path.file_stem().unwrap_or_default().to_string_lossy();
+        if let Err(e) = lua.load_plugin_from_str(&name, &code) {
+            eprintln!("sift: failed to load plugin {}: {e}", path.display());
+        }
+    }
+}
+
 fn load_plugins_from_dir(lua: &mut SiftLua, dir: &PathBuf) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "lua") {
-                if let Ok(code) = std::fs::read_to_string(&path) {
-                    let name = path.file_stem().unwrap_or_default().to_string_lossy();
-                    if let Err(e) = lua.load_plugin_from_str(&name, &code) {
-                        eprintln!("sift: failed to load plugin {}: {e}", path.display());
-                    }
-                }
+                load_plugin_file(lua, &path);
             }
         }
     }

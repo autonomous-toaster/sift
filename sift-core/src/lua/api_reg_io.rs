@@ -9,23 +9,28 @@ use sha2::Digest;
 
 use serde_json;
 
+fn sha256_hash(_: &Lua, (_ctx, data): (Table, mlua::String)) -> mlua::Result<String> {
+    Ok(hex::encode(sha2::Sha256::digest(data.as_bytes())))
+}
+
+fn md5_hash(_: &Lua, (_ctx, data): (Table, mlua::String)) -> mlua::Result<String> {
+    Ok(hex::encode(md5::Md5::digest(data.as_bytes())))
+}
+
+fn env_get(_: &Lua, (_ctx, key): (Table, String)) -> mlua::Result<Option<String>> {
+    Ok(std::env::var(key).ok())
+}
+
+fn env_set(_: &Lua, (_ctx, key, val): (Table, String, String)) -> mlua::Result<()> {
+    std::env::set_var(&key, &val);
+    Ok(())
+}
+
 impl SiftLua {
     pub(super) fn register_hash(&self, sift: &Table) -> Result<()> {
         let hash = self.lua.create_table()?;
-        let sha256_fn = self
-            .lua
-            .create_function(|_, (ctx, data): (Table, mlua::String)| {
-                let _ = ctx; // ctx unused, accepted for API consistency
-                Ok(hex::encode(sha2::Sha256::digest(data.as_bytes())))
-            })?;
-        hash.set("sha256", sha256_fn)?;
-        let md5_fn = self
-            .lua
-            .create_function(|_, (ctx, data): (Table, mlua::String)| {
-                let _ = ctx; // ctx unused, accepted for API consistency
-                Ok(hex::encode(md5::Md5::digest(data.as_bytes())))
-            })?;
-        hash.set("md5", md5_fn)?;
+        hash.set("sha256", self.lua.create_function(sha256_hash)?)?;
+        hash.set("md5", self.lua.create_function(md5_hash)?)?;
         sift.set("hash", hash)?;
         Ok(())
     }
@@ -376,19 +381,8 @@ impl SiftLua {
 
     pub(super) fn register_env(&self, sift: &Table) -> Result<()> {
         let env = self.lua.create_table()?;
-        let env_get = self.lua.create_function(|_, (ctx, key): (Table, String)| {
-            let _ = ctx;
-            Ok(std::env::var(key).ok())
-        })?;
-        env.set("get", env_get)?;
-        let env_set = self
-            .lua
-            .create_function(|_, (ctx, key, val): (Table, String, String)| {
-                let _ = ctx;
-                std::env::set_var(&key, &val);
-                Ok(())
-            })?;
-        env.set("set", env_set)?;
+        env.set("get", self.lua.create_function(env_get)?)?;
+        env.set("set", self.lua.create_function(env_set)?)?;
         sift.set("env", env)?;
         Ok(())
     }
