@@ -163,6 +163,147 @@ impl From<mlua::Error> for ParseError {
 }
 
 #[allow(clippy::too_many_lines)]
+/// Try to parse a short count argument (e.g., "-3" → n=3).
+/// Returns true if the argument was handled as a short count.
+fn try_short_count(arg: &str, result: &Table, short_count: bool) -> Result<bool, ParseError> {
+    if !short_count {
+        return Ok(false);
+    }
+    let rest = &arg[1..];
+    if let Ok(n) = rest.parse::<i64>() {
+        result.set("n", n)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Try to parse combined short flags (e.g., "-vs" → -v -s).
+/// Returns true if the argument was handled as combined flags.
+fn try_combined_short_flags(
+    arg: &str,
+    result: &Table,
+    flag_map: &[(String, FlagEntry)],
+    allow_unknown: bool,
+) -> Result<bool, ParseError> {
+    if arg.starts_with("--") || arg.len() <= 2 {
+        return Ok(false);
+    }
+    let rest = &arg[1..];
+    let all_boolean = rest.chars().all(|ch| {
+        let alias = format!("-{ch}");
+        lookup_flag(flag_map, &alias).map_or(allow_unknown, |e| e.flag_type == "boolean")
+    });
+    if !all_boolean {
+        return Ok(false);
+    }
+    for ch in rest.chars() {
+        let alias = format!("-{ch}");
+        if let Some(entry) = lookup_flag(flag_map, &alias) {
+            result.set(entry.name.as_str(), true)?;
+        } else if !allow_unknown {
+            return Err(ParseError::Passthrough);
+        }
+    }
+    Ok(true)
+}
+
+/// Handle a long flag (--flag or --flag=value).
+/// Returns true if the argument was handled.
+fn handle_long_flag(
+    lua: &Lua,
+    arg: &str,
+    i: &mut usize,
+    args_len: usize,
+    result: &Table,
+    flag_map: &[(String, FlagEntry)],
+    allow_unknown: bool,
+    args: &Table,
+) -> Result<bool, ParseError> {
+    if !arg.starts_with("--") {
+        return Ok(false);
+    }
+    let eq_pos = arg.find('=');
+    let alias = eq_pos.map_or_else(|| arg.to_string(), |pos| arg[..pos].to_string());
+    let inline_value = eq_pos.map(|pos| arg[pos + 1..].to_string());
+
+    if let Some(entry) = lookup_flag(flag_map, &alias) {
+        if entry.flag_type == "boolean" {
+            result.set(entry.name.as_str(), true)?;
+        } else if let Some(ref val) = inline_value {
+            handle_value_flag(lua, result, entry, val)?;
+        } else {
+            *i += 1;
+            if *i > args_len {
+                return Err(missing_value_err(lua, &alias));
+            }
+            let val: String = args.get(*i)?;
+            handle_value_flag(lua, result, entry, &val)?;
+        }
+        *i += 1;
+        return Ok(true);
+    }
+
+    // Unknown long flag
+    if !allow_unknown {
+        return Err(ParseError::Passthrough);
+    }
+    if inline_value.is_none() && *i < args_len {
+        let next: String = args.get(*i + 1)?;
+        if !next.starts_with('-') {
+            *i += 1;
+        }
+    }
+    *i += 1;
+    Ok(true)
+}
+
+/// Handle a short flag (-f or -f value).
+/// Returns true if the argument was handled.
+fn handle_short_flag(
+    lua: &Lua,
+    arg: &str,
+    i: &mut usize,
+    args_len: usize,
+    result: &Table,
+    flag_map: &[(String, FlagEntry)],
+    allow_unknown: bool,
+    args: &Table,
+) -> Result<bool, ParseError> {
+    if !arg.starts_with('-') || arg.len() <= 1 {
+        return Ok(false);
+    }
+    let alias = arg.to_string();
+    if let Some(entry) = lookup_flag(flag_map, &alias) {
+        if entry.flag_type == "boolean" {
+            result.set(entry.name.as_str(), true)?;
+        } else {
+            *i += 1;
+            if *i > args_len {
+                return Err(missing_value_err(lua, &alias));
+            }
+            let val: String = args.get(*i)?;
+            handle_value_flag(lua, result, entry, &val)?;
+        }
+        *i += 1;
+        return Ok(true);
+    }
+
+    // Unknown short flag
+    if !allow_unknown {
+        return Err(ParseError::Passthrough);
+    }
+    if *i < args_len {
+        let next: String = args.get(*i + 1)?;
+        if !next.starts_with('-') {
+            *i += 1;
+        }
+    }
+    *i += 1;
+    Ok(true)
+}
+
+#[allow(clippy::too_many_lines)]
 fn parse_args(
     lua: &Lua,
     args: &Table,
@@ -209,105 +350,21 @@ fn parse_args(
         }
 
         if arg.starts_with('-') && arg.len() > 1 {
-            // Short count?
-            if short_count {
-                let rest = &arg[1..];
-                if let Ok(n) = rest.parse::<i64>() {
-                    result.set("n", n)?;
-                    i += 1;
-                    continue;
-                }
-            }
-
-            // Combined short flags? (e.g., -vs → -v -s)
-            if !arg.starts_with("--") && arg.len() > 2 {
-                let rest = &arg[1..];
-                let all_boolean = rest.chars().all(|ch| {
-                    let alias = format!("-{ch}");
-                    lookup_flag(&flag_map, &alias)
-                        .map_or(allow_unknown, |e| e.flag_type == "boolean")
-                });
-
-                if all_boolean {
-                    for ch in rest.chars() {
-                        let alias = format!("-{ch}");
-                        if let Some(entry) = lookup_flag(&flag_map, &alias) {
-                            result.set(entry.name.as_str(), true)?;
-                        } else if !allow_unknown {
-                            return Err(ParseError::Passthrough);
-                        }
-                    }
-                    i += 1;
-                    continue;
-                }
-            }
-
-            // Long flag: --flag or --flag=value
-            if arg.starts_with("--") {
-                let eq_pos = arg.find('=');
-                let alias = eq_pos.map_or_else(|| arg.clone(), |pos| arg[..pos].to_string());
-                let inline_value = eq_pos.map(|pos| arg[pos + 1..].to_string());
-
-                if let Some(entry) = lookup_flag(&flag_map, &alias) {
-                    if entry.flag_type == "boolean" {
-                        result.set(entry.name.as_str(), true)?;
-                    } else if let Some(ref val) = inline_value {
-                        handle_value_flag(lua, &result, entry, val)?;
-                    } else {
-                        i += 1;
-                        if i > args_len {
-                            return Err(missing_value_err(lua, &alias));
-                        }
-                        let val: String = args.get(i)?;
-                        handle_value_flag(lua, &result, entry, &val)?;
-                    }
-                    i += 1;
-                    continue;
-                }
-
-                // Unknown long flag
-                if !allow_unknown {
-                    return Err(ParseError::Passthrough);
-                }
-                if inline_value.is_none() && i < args_len {
-                    let next: String = args.get(i + 1)?;
-                    if !next.starts_with('-') {
-                        i += 1;
-                    }
-                }
+            if try_short_count(&arg, &result, short_count)? {
                 i += 1;
                 continue;
             }
-
-            // Short flag: -f or -f value
-            let alias = arg.clone();
-            if let Some(entry) = lookup_flag(&flag_map, &alias) {
-                if entry.flag_type == "boolean" {
-                    result.set(entry.name.as_str(), true)?;
-                } else {
-                    i += 1;
-                    if i > args_len {
-                        return Err(missing_value_err(lua, &alias));
-                    }
-                    let val: String = args.get(i)?;
-                    handle_value_flag(lua, &result, entry, &val)?;
-                }
+            if try_combined_short_flags(&arg, &result, &flag_map, allow_unknown)? {
                 i += 1;
                 continue;
             }
-
-            // Unknown short flag
-            if !allow_unknown {
-                return Err(ParseError::Passthrough);
+            if handle_long_flag(lua, &arg, &mut i, args_len, &result, &flag_map, allow_unknown, &args)? {
+                continue;
             }
-            if i < args_len {
-                let next: String = args.get(i + 1)?;
-                if !next.starts_with('-') {
-                    i += 1;
-                }
+            if handle_short_flag(lua, &arg, &mut i, args_len, &result, &flag_map, allow_unknown, &args)? {
+                continue;
             }
-            i += 1;
-            continue;
+            // If none handled it, fall through to positional
         }
 
         // Positional argument

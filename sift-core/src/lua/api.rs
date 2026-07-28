@@ -383,24 +383,13 @@ impl SiftLua {
     /// Dispatch a command to the best matching plugin.
     ///
     /// Returns `(output, exit_code, plugin_name)`.
-    pub fn dispatch(
+    /// Build the context table for a plugin execution.
+    fn build_plugin_context(
         &self,
         cmd: &str,
-        args: &[String],
-        stdin: Option<Value>,
-        merge_stderr: bool,
         original_cmd: &str,
-    ) -> Result<(String, i32, String)> {
-        // Record dispatch start time for exec_time_ms measurement
-        if let Ok(mut start) = self.dispatch_start.lock() {
-            *start = Some(std::time::Instant::now());
-        }
-
-        let entry = self.find_entry(cmd, args)?;
-
-        let execute: Function = self.lua.registry_value(&entry.execute_fn)?;
-
-        // Build context table from pre-created template, update changing fields
+        merge_stderr: bool,
+    ) -> Result<Table> {
         let ctx = if let Some(key) = self.ctx_template_key.as_ref() {
             let t: Table = self.lua.registry_value(key)?;
             t.set("cmd_count", self.ctx.cmd_count.get())?;
@@ -418,6 +407,154 @@ impl SiftLua {
             t.set("merge_stderr", merge_stderr)?;
             t
         };
+        Ok(ctx)
+    }
+
+    /// Handle passthrough status: run the command directly.
+    fn handle_passthrough_status(
+        &self,
+        cmd: &str,
+        args: &[String],
+        passthrough_stdin: Option<String>,
+        original_cmd: &str,
+    ) -> Result<(String, i32, String)> {
+        let (passthrough_output, passthrough_exit_code, _) =
+            Self::execute_passthrough(cmd, args, passthrough_stdin, original_cmd)?;
+        let raw = i64::try_from(passthrough_output.len()).unwrap_or(i64::MAX);
+        self.record_conversation(
+            cmd,
+            Some(raw),
+            Some(raw),
+            Some("command"),
+            Some("passthrough"),
+            Some(cmd.to_string()),
+            None,
+            None,
+        );
+        Ok((passthrough_output, passthrough_exit_code, "command".to_string()))
+    }
+
+    /// Handle unchanged status: format message with burst detection.
+    fn handle_unchanged_status(&self, cmd: &str, result: Option<&Table>) -> String {
+        let mut msg = match result {
+            Some(r) => Self::handle_unchanged(r),
+            None => String::new(),
+        };
+
+        // Burst detection: track recent unchanged responses
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let key = format!("{cmd}:{msg}");
+        if let Ok(mut recent) = self.recent_unchanged.lock() {
+            recent.retain(|(_, ts)| now.saturating_sub(*ts) < 10_000);
+            recent.push((key.clone(), now));
+            while recent.len() > 10 {
+                recent.remove(0);
+            }
+            let count = recent.iter().filter(|(k, _)| k == &key).count();
+            if count >= 3 {
+                msg = format!(
+                    "{msg}\n[nudge] (this will keep returning the same result until the file changes on disk)",
+                );
+            }
+        }
+
+        print!("{msg}");
+        let _ = std::io::stdout().flush();
+        msg
+    }
+
+    /// Handle handled output: write to stdout unless streamed.
+    fn handle_handled_output(output: &str, result: Option<&Table>) -> String {
+        let streamed: bool = result
+            .as_ref()
+            .is_some_and(|r| r.raw_get("streamed").unwrap_or(false));
+        if !streamed && !output.is_empty() {
+            print!("{output}");
+            let _ = std::io::stdout().flush();
+        }
+        output.to_string()
+    }
+
+    /// Finalize dispatch: collect nudges, record conversation, increment counter.
+    /// Returns the final output string with exit code and plugin name.
+    fn finalize_dispatch(
+        &self,
+        cmd: &str,
+        args: &[String],
+        final_output: &str,
+        status: &str,
+        result: Option<&Table>,
+        entry: &PluginEntry,
+    ) -> Result<(String, i32, String)> {
+        let mut final_output = final_output.to_string();
+        let nudge_text = self.collect_nudges();
+        if !nudge_text.is_empty() {
+            print!("{nudge_text}");
+            let _ = std::io::stdout().flush();
+            final_output.push_str(&nudge_text);
+        }
+
+        let raw_bytes: Option<i64> = result
+            .as_ref()
+            .and_then(|r| r.raw_get("raw_bytes").ok())
+            .flatten();
+        let filtered_bytes = i64::try_from(final_output.len()).unwrap_or(i64::MAX);
+        let plugin_name = entry.patterns.first().map(String::as_str);
+        let output_format = if status == "unchanged" {
+            Some("unchanged")
+        } else {
+            Some("text")
+        };
+        let cache_hit = Some(output_format == Some("unchanged"));
+        let exec_time_ms = self.dispatch_start.lock().map_or(None, |start| {
+            start.map(|s| i64::try_from(s.elapsed().as_millis()).unwrap_or(i64::MAX))
+        });
+        let full_cmd = if args.is_empty() {
+            cmd.to_string()
+        } else {
+            let quoted: Vec<String> = args.iter().map(|a| sh_quote(a)).collect();
+            format!("{} {}", cmd, quoted.join(" "))
+        };
+        self.record_conversation(
+            cmd,
+            raw_bytes.or(Some(filtered_bytes)),
+            Some(filtered_bytes),
+            plugin_name,
+            output_format,
+            Some(full_cmd),
+            exec_time_ms,
+            cache_hit,
+        );
+        self.ctx.cmd_count.set(self.ctx.cmd_count.get() + 1);
+        let exit_code: i32 = result
+            .as_ref()
+            .and_then(|r| r.raw_get("exit_code").ok())
+            .unwrap_or(0);
+        Ok((final_output, exit_code, plugin_name.unwrap_or("").to_string()))
+    }
+
+    /// Dispatch a command to a matching plugin.
+    ///
+    /// Returns `(output, exit_code, plugin_name)`.
+    pub fn dispatch(
+        &self,
+        cmd: &str,
+        args: &[String],
+        stdin: Option<Value>,
+        merge_stderr: bool,
+        original_cmd: &str,
+    ) -> Result<(String, i32, String)> {
+        // Record dispatch start time for exec_time_ms measurement
+        if let Ok(mut start) = self.dispatch_start.lock() {
+            *start = Some(std::time::Instant::now());
+        }
+
+        let entry = self.find_entry(cmd, args)?;
+        let execute: Function = self.lua.registry_value(&entry.execute_fn)?;
+        let ctx = self.build_plugin_context(cmd, original_cmd, merge_stderr)?;
 
         // Build args table (arguments only, no command name)
         let args_table = self.lua.create_table()?;
@@ -454,122 +591,16 @@ impl SiftLua {
             };
 
         if status == "passthrough" {
-            let (passthrough_output, passthrough_exit_code, _) =
-                Self::execute_passthrough(cmd, args, passthrough_stdin, original_cmd)?;
-            let raw = i64::try_from(passthrough_output.len()).unwrap_or(i64::MAX);
-            self.record_conversation(
-                cmd,
-                Some(raw),
-                Some(raw),
-                Some("command"),
-                Some("passthrough"),
-                Some(cmd.to_string()),
-                None,
-                None,
-            );
-            return Ok((
-                passthrough_output,
-                passthrough_exit_code,
-                "command".to_string(),
-            ));
+            return self.handle_passthrough_status(cmd, args, passthrough_stdin, original_cmd);
         }
 
         let final_output = if status == "unchanged" {
-            let mut msg = match result.as_ref() {
-                Some(r) => Self::handle_unchanged(r),
-                None => String::new(),
-            };
-
-            // Burst detection: track recent unchanged responses
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            let key = format!("{cmd}:{msg}");
-            if let Ok(mut recent) = self.recent_unchanged.lock() {
-                // Prune entries older than 10 seconds
-                recent.retain(|(_, ts)| now.saturating_sub(*ts) < 10_000);
-                recent.push((key.clone(), now));
-                // Keep sliding window of last 10
-                while recent.len() > 10 {
-                    recent.remove(0);
-                }
-                // Count occurrences of this key in the window
-                let count = recent.iter().filter(|(k, _)| k == &key).count();
-                if count >= 3 {
-                    msg = format!(
-                            "{msg}\n[nudge] (this will keep returning the same result until the file changes on disk)",
-                        );
-                }
-            }
-
-            // Write unchanged message directly to stdout (for real-time visibility)
-            print!("{msg}");
-            let _ = std::io::stdout().flush();
-            msg
+            self.handle_unchanged_status(cmd, result.as_ref())
         } else {
-            // Write handled output directly to stdout (unless already streamed by plugin)
-            let streamed: bool = result
-                .as_ref()
-                .is_some_and(|r| r.raw_get("streamed").unwrap_or(false));
-            if !streamed && !output.is_empty() {
-                print!("{output}");
-                let _ = std::io::stdout().flush();
-            }
-            output
+            Self::handle_handled_output(&output, result.as_ref())
         };
 
-        let mut final_output = final_output;
-        let nudge_text = self.collect_nudges();
-        // Write nudges directly to stdout (for real-time visibility)
-        if !nudge_text.is_empty() {
-            print!("{nudge_text}");
-            let _ = std::io::stdout().flush();
-            final_output.push_str(&nudge_text);
-        }
-
-        // Extract raw_bytes from plugin result (optional)
-        let raw_bytes: Option<i64> = result
-            .as_ref()
-            .and_then(|r| r.raw_get("raw_bytes").ok())
-            .flatten();
-        let filtered_bytes = i64::try_from(final_output.len()).unwrap_or(i64::MAX);
-        let plugin_name = entry.patterns.first().map(String::as_str);
-        let output_format = if status == "unchanged" {
-            Some("unchanged")
-        } else {
-            Some("text")
-        };
-        let cache_hit = Some(output_format == Some("unchanged"));
-        let exec_time_ms = self.dispatch_start.lock().map_or(None, |start| {
-            start.map(|s| i64::try_from(s.elapsed().as_millis()).unwrap_or(i64::MAX))
-        });
-        // Reconstruct full command from name + args
-        let full_cmd = if args.is_empty() {
-            cmd.to_string()
-        } else {
-            let quoted: Vec<String> = args.iter().map(|a| sh_quote(a)).collect();
-            format!("{} {}", cmd, quoted.join(" "))
-        };
-        self.record_conversation(
-            cmd,
-            raw_bytes.or(Some(filtered_bytes)),
-            Some(filtered_bytes),
-            plugin_name,
-            output_format,
-            Some(full_cmd),
-            exec_time_ms,
-            cache_hit,
-        );
-
-        // Increment command counter for next dispatch
-        self.ctx.cmd_count.set(self.ctx.cmd_count.get() + 1);
-
-        Ok((
-            final_output,
-            exit_code,
-            entry.patterns.first().cloned().unwrap_or_default(),
-        ))
+        self.finalize_dispatch(cmd, args, &final_output, &status, result.as_ref(), entry)
     }
 
     /// Find the best matching plugin entry, falling back to __default__.
