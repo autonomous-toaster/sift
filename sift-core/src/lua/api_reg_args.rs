@@ -29,10 +29,6 @@ fn coerce_value(lua: &Lua, raw: &str, ty: &str) -> Result<Value, String> {
             let n: i64 = raw.parse().map_err(|_| format!("invalid integer: {raw}"))?;
             Ok(Value::Integer(n))
         }
-        "str" => Ok(Value::String(
-            lua.create_string(raw)
-                .map_err(|e| format!("create string: {e}"))?,
-        )),
         _ => Ok(Value::String(
             lua.create_string(raw)
                 .map_err(|e| format!("create string: {e}"))?,
@@ -178,6 +174,24 @@ fn try_short_count(arg: &str, result: &Table, short_count: bool) -> Result<bool,
     }
 }
 
+/// Set boolean flags for combined short flags (e.g., -vs → -v=true, -s=true).
+fn set_combined_short_flags(
+    rest: &str,
+    result: &Table,
+    flag_map: &[(String, FlagEntry)],
+    allow_unknown: bool,
+) -> Result<(), ParseError> {
+    for ch in rest.chars() {
+        let alias = format!("-{ch}");
+        if let Some(entry) = lookup_flag(flag_map, &alias) {
+            result.set(entry.name.as_str(), true)?;
+        } else if !allow_unknown {
+            return Err(ParseError::Passthrough);
+        }
+    }
+    Ok(())
+}
+
 /// Try to parse combined short flags (e.g., "-vs" → -v -s).
 /// Returns true if the argument was handled as combined flags.
 fn try_combined_short_flags(
@@ -197,15 +211,31 @@ fn try_combined_short_flags(
     if !all_boolean {
         return Ok(false);
     }
-    for ch in rest.chars() {
-        let alias = format!("-{ch}");
-        if let Some(entry) = lookup_flag(flag_map, &alias) {
-            result.set(entry.name.as_str(), true)?;
-        } else if !allow_unknown {
-            return Err(ParseError::Passthrough);
-        }
-    }
+    set_combined_short_flags(rest, result, flag_map, allow_unknown)?;
     Ok(true)
+}
+
+/// Handle a non-boolean long flag value (--flag=value or --flag value).
+fn handle_long_flag_value(
+    lua: &Lua,
+    entry: &FlagEntry,
+    inline_value: Option<&str>,
+    i: &mut usize,
+    args_len: usize,
+    result: &Table,
+    args: &Table,
+) -> Result<(), ParseError> {
+    if let Some(ref val) = inline_value {
+        handle_value_flag(lua, result, entry, val)?;
+    } else {
+        *i += 1;
+        if *i > args_len {
+            return Err(missing_value_err(lua, &entry.name));
+        }
+        let val: String = args.get(*i)?;
+        handle_value_flag(lua, result, entry, &val)?;
+    }
+    Ok(())
 }
 
 /// Handle a known long flag (--flag or --flag=value).
@@ -220,15 +250,8 @@ fn handle_known_long_flag(
 ) -> Result<(), ParseError> {
     if entry.flag_type == "boolean" {
         result.set(entry.name.as_str(), true)?;
-    } else if let Some(ref val) = inline_value {
-        handle_value_flag(lua, result, entry, val)?;
     } else {
-        *i += 1;
-        if *i > args_len {
-            return Err(missing_value_err(lua, &entry.name));
-        }
-        let val: String = args.get(*i)?;
-        handle_value_flag(lua, result, entry, &val)?;
+        handle_long_flag_value(lua, entry, inline_value, i, args_len, result, args)?;
     }
     Ok(())
 }

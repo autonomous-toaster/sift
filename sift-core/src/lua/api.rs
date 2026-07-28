@@ -429,19 +429,14 @@ impl SiftLua {
         Ok((passthrough_output, passthrough_exit_code, "command".to_string()))
     }
 
-    /// Handle unchanged status: format message with burst detection.
-    fn handle_unchanged_status(&self, cmd: &str, result: Option<&Table>) -> String {
-        let mut msg = match result {
-            Some(r) => Self::handle_unchanged(r),
-            None => String::new(),
-        };
-
-        // Burst detection: track recent unchanged responses
+    /// Check for burst of unchanged responses and append warning if needed.
+    fn check_unchanged_burst(&self, cmd: &str, msg: &str) -> String {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
         let key = format!("{cmd}:{msg}");
+        let mut result = msg.to_string();
         if let Ok(mut recent) = self.recent_unchanged.lock() {
             recent.retain(|(_, ts)| now.saturating_sub(*ts) < 10_000);
             recent.push((key.clone(), now));
@@ -450,12 +445,21 @@ impl SiftLua {
             }
             let count = recent.iter().filter(|(k, _)| k == &key).count();
             if count >= 3 {
-                msg = format!(
+                result = format!(
                     "{msg}\n[nudge] (this will keep returning the same result until the file changes on disk)",
                 );
             }
         }
+        result
+    }
 
+    /// Handle unchanged status: format message with burst detection.
+    fn handle_unchanged_status(&self, cmd: &str, result: Option<&Table>) -> String {
+        let msg = match result {
+            Some(r) => Self::handle_unchanged(r),
+            None => String::new(),
+        };
+        let msg = self.check_unchanged_burst(cmd, &msg);
         print!("{msg}");
         let _ = std::io::stdout().flush();
         msg
