@@ -5,7 +5,7 @@ return {
     name = "rtk",
     priority = 0,
     pattern = { "ls", "tree", "read", "git", "gh", "glab", "aws", "psql",
-                "pnpm", "err", "test", "json", "deps", "env", "find", "diff",
+                "pnpm", "err", "test", "json", "deps", "find", "diff",
                 "log", "dotnet", "docker", "kubectl", "summary",
                 "init", "wget", "wc", "gain", "cc-economics", "config",
                 "jest", "vitest", "prisma", "tsc", "next", "lint", "smart" },
