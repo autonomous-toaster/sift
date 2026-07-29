@@ -3,6 +3,7 @@ use crate::lua::exec::{exec_command, save_output, TransformFn};
 use anyhow::Result;
 use mlua::Table;
 use sha2::Digest;
+use std::sync::{Arc, Mutex};
 
 use serde_json;
 
@@ -43,8 +44,60 @@ impl SiftLua {
                 let stdin = opts
                     .as_ref()
                     .and_then(|t| t.get::<String>("stdin").ok());
+                let scred = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<bool>("scred").ok())
+                    .unwrap_or(false);
 
-                let (stdout, stderr, exit_code) = exec_command(
+                // Build transform: either from Lua callback or from scred (Rust-side)
+                let mut transform: Option<TransformFn> = None;
+                #[cfg(feature = "scred")]
+                let mut scred_stream: Option<Arc<Mutex<scred_redactor::streaming::RedactionStream>>> = None;
+                #[cfg(not(feature = "scred"))]
+                let scred_stream: Option<Arc<Mutex<()>>> = None;
+
+                if scred {
+                    #[cfg(feature = "scred")]
+                    {
+                        use scred_redactor::{
+                            redactor::{RedactionConfig, RedactionEngine},
+                            streaming::RedactionStream,
+                        };
+                        let engine = Arc::new(RedactionEngine::new(RedactionConfig::default()));
+                        let stream = Arc::new(Mutex::new(RedactionStream::new(engine)));
+                        let feed_stream = stream.clone();
+                        let t: TransformFn = Box::new(move |chunk: &str| -> String {
+                            let mut s = match feed_stream.lock() {
+                                Ok(s) => s,
+                                Err(_) => return chunk.to_string(),
+                            };
+                            let redacted = s.feed(chunk.as_bytes());
+                            String::from_utf8_lossy(&redacted).to_string()
+                        });
+                        transform = Some(t);
+                        scred_stream = Some(stream);
+                    }
+                } else {
+                    transform = opts
+                        .as_ref()
+                        .and_then(|t| t.get::<mlua::Function>("transform").ok())
+                        .and_then(|func| {
+                            let lua_clone = lua.clone();
+                            let Ok(key) = lua.create_registry_value(func) else {
+                                return None;
+                            };
+                            let b: TransformFn = Box::new(move |chunk: &str| -> String {
+                                lua_clone
+                                    .registry_value::<mlua::Function>(&key)
+                                    .ok()
+                                    .and_then(|f| f.call::<String>(chunk).ok())
+                                    .unwrap_or_else(|| chunk.to_string())
+                            });
+                            Some(b)
+                        });
+                }
+
+                let (mut stdout, stderr, exit_code) = exec_command(
                     &cmd,
                     &session_id,
                     cmd_count,
@@ -53,6 +106,15 @@ impl SiftLua {
                     merge_stderr,
                     stdin,
                 )?;
+
+                // If scred transform was used, finalize the stream and append lookahead
+                #[cfg(feature = "scred")]
+                if let Some(ref stream) = scred_stream {
+                    if let Ok(mut s) = stream.lock() {
+                        let (final_chunk, _stats) = s.finalize();
+                        stdout.push_str(&String::from_utf8_lossy(&final_chunk));
+                    }
+                }
                 let combined = format!("{stdout}{stderr}");
                 // On-error save with auto-nudge
                 if exit_code != 0 {

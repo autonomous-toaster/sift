@@ -18,11 +18,10 @@ return {
 
         -- Check if scred extension is available
         if sift.ext ~= nil and sift.ext.scred ~= nil then
-            local out, stderr, code = sift.exec(ctx, cmd, { silent = true })
-            local redacted = sift.ext.scred.redact(ctx, out)
+            local out, stderr, code = sift.exec(ctx, cmd, { scred = true, silent = true })
             return {
                 status = "handled",
-                output = redacted,
+                output = out,
                 exit_code = code
             }
         end
