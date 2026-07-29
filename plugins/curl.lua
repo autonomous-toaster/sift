@@ -10,8 +10,7 @@ return {
     priority = 0,
     pattern = "curl",
     append_prompt = "HTTP responses are transformed (JSON compressed, PDF→markdown). " ..
-        "Follow [nudge] raw: hints to access the saved response " ..
-        "without re-issuing the request.",
+        "Use 'command curl' to bypass, or 'command cat' to read saved responses.",
 
     execute = function(ctx, args, stdin)
         -- Helper: derive a filesystem-safe slug from the curl URL

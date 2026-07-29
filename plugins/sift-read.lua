@@ -93,7 +93,7 @@ return {
                 local nudge_args = ""
                 if offset then nudge_args = nudge_args .. " " .. offset end
                 if limit then nudge_args = nudge_args .. " " .. limit end
-                sift.nudge(ctx, "raw: 'sift-read --raw " .. path .. nudge_args .. "'")
+                sift.nudge(ctx, "raw: sift-read --raw " .. path .. nudge_args)
             end
             -- Cache extracted text by file hash
             sift.cache.store_file(ctx, hash, text)
@@ -131,7 +131,7 @@ return {
             local nudge_args = ""
             if offset then nudge_args = nudge_args .. " " .. offset end
             if limit then nudge_args = nudge_args .. " " .. limit end
-            sift.nudge(ctx, "raw: 'sift-read --raw " .. path .. nudge_args .. "'")
+            sift.nudge(ctx, "raw: sift-read --raw " .. path .. nudge_args)
         end
 
         local total_lines = #sift.str.split_lines(ctx, content)

@@ -118,9 +118,8 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ── System prompt nudge ─────────────────────────────────────────
+	// ── System prompt from plugins ──────────────────────────────────
 	pi.on("before_agent_start", async (event) => {
-		// Inject append_prompt from plugins
 		let appendPrompt = "";
 		try {
 			appendPrompt = execSync("sift --append-prompt", {
@@ -134,10 +133,6 @@ export default function (pi: ExtensionAPI) {
 		return {
 			systemPrompt:
 				event.systemPrompt +
-				'\n\n[sift] caches file reads. When you see "[sift] ... unchanged (cached)", ' +
-				'the content is already in this conversation — say "same as before" and move on. ' +
-				"Do NOT re-read or bypass the cache unless you have a specific reason to believe " +
-				"the file changed on disk." +
 				(appendPrompt ? '\n\n' + appendPrompt : ''),
 		};
 	});

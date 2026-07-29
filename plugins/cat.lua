@@ -8,7 +8,7 @@ return {
     priority = 0,
     pattern = "cat",
     append_prompt = "Markdown files may be compressed via mdmin. " ..
-        "Follow [nudge] raw: hints to get the original content.",
+        "Use 'command cat' to read without compression.",
 
     execute = function(ctx, args, stdin)
         -- Handle piped stdin (supports both string and StdinReader)
@@ -70,7 +70,7 @@ return {
         -- Compress markdown files via mdmin (level 2, preserve code blocks)
         if sift.ext.markdown ~= nil and (path:match("%.md$") or path:match("%.markdown$")) then
             content = sift.ext.markdown.compress(ctx, content, { level = 2, code_blocks = "preserve", dictionary = true })
-            sift.nudge(ctx, "raw: 'command cat " .. path .. "'")
+            sift.nudge(ctx, "raw: command cat " .. path)
         end
 
         -- Compute hash for cache

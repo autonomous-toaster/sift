@@ -10,7 +10,7 @@ return {
                 "init", "wget", "wc", "gain", "cc-economics", "config",
                 "jest", "vitest", "prisma", "tsc", "next", "lint", "smart" },
     append_prompt = "Output from git, docker, ls and other commands is compressed by rtk. " ..
-        "Follow [nudge] command: hints to get raw output.",
+        "Use 'command' prefix to bypass.",
 
     execute = function(ctx, args, stdin)
         local parts = {ctx.command}
@@ -21,7 +21,7 @@ return {
 
         local output, stderr, exit_code = sift.exec(ctx, "rtk " .. cmd)
         if exit_code == 0 then
-            sift.nudge(ctx, "command: '" .. ctx.original_cmd .. "'")
+            sift.nudge(ctx, "raw: command " .. ctx.original_cmd)
             return {
                 status = "handled",
                 output = output .. stderr,
