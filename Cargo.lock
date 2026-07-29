@@ -3926,6 +3926,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "scred-detector"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "num_cpus",
+]
+
+[[package]]
+name = "scred-redactor"
+version = "0.1.0"
+dependencies = [
+ "scred-detector",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4106,6 +4124,7 @@ dependencies = [
  "mime_guess",
  "mlua",
  "regex-lite",
+ "scred-redactor",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4833,6 +4852,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",

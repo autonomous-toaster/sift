@@ -75,8 +75,8 @@ fn test_agent_mode_epipe_resilience() {
 
 #[test]
 fn test_scred_plugin_echo() {
-    // The scred plugin intercepts echo commands and pipes through scred.
-    // If scred is not installed, the plugin returns original output.
+    // The shell plugin handles echo commands (falls through to __default__).
+    // When scred feature is enabled, output is redacted via sift.ext.scred.
     let mut cmd = Command::cargo_bin("sift").unwrap();
     cmd.arg("-c").arg("echo hello from scred test");
     cmd.assert()
@@ -86,8 +86,17 @@ fn test_scred_plugin_echo() {
 
 #[test]
 fn test_scred_plugin_env() {
-    // The scred plugin intercepts env commands.
+    // The shell plugin handles env commands.
     let mut cmd = Command::cargo_bin("sift").unwrap();
     cmd.arg("-c").arg("env");
+    cmd.assert().success();
+}
+
+#[test]
+fn test_shell_plugin_default_fallback() {
+    // The shell plugin (pattern = __default__) handles commands that don't
+    // match any other plugin. It should execute them normally.
+    let mut cmd = Command::cargo_bin("sift").unwrap();
+    cmd.arg("-c").arg("whoami");
     cmd.assert().success();
 }

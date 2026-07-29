@@ -18,6 +18,8 @@ impl SiftLua {
         self.register_ext_html(&ext)?;
         #[cfg(feature = "mdmin")]
         self.register_ext_markdown(&ext)?;
+        #[cfg(feature = "scred")]
+        self.register_ext_scred(&ext)?;
         sift.set("ext", ext)?;
         Ok(())
     }
@@ -187,6 +189,100 @@ impl SiftLua {
         Ok(())
     }
 
+    /// Register `sift.ext.scred` — secret redaction (gated behind `scred` feature).
+    #[cfg(feature = "scred")]
+    fn register_ext_scred(&self, ext: &Table) -> Result<()> {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        use scred_redactor::{
+            redactor::{RedactionConfig, RedactionEngine},
+            streaming::RedactionStream,
+        };
+        use scred_redactor::scred_detector::{SIMPLE_PREFIX_PATTERNS, PREFIX_VALIDATION_PATTERNS};
+
+        let scred_tbl = self.lua.create_table()?;
+        let lua = self.lua.clone();
+
+        // Build name-to-pattern-type-ID mapping at registration time
+        let mut name_to_id: HashMap<&'static str, u16> = HashMap::new();
+        for (i, p) in SIMPLE_PREFIX_PATTERNS.iter().enumerate() {
+            name_to_id.insert(p.name, i as u16);
+        }
+        for (i, p) in PREFIX_VALIDATION_PATTERNS.iter().enumerate() {
+            name_to_id.insert(p.name, 100u16 + i as u16);
+        }
+
+        // Shared engine for all streams
+        let engine = Arc::new(RedactionEngine::new(RedactionConfig::default()));
+
+        // sift.ext.scred.create_transform(opts?) -> (transform_fn, finalize_fn)
+        let engine_ct = engine.clone();
+        let name_to_id_ct = name_to_id.clone();
+        let lua_ct = lua.clone();
+        let create_transform = lua.clone().create_function(
+            move |_, (_ctx, opts): (Table, Option<Table>)| {
+                let allowed = parse_allowed_patterns(opts.as_ref(), &name_to_id_ct)
+                    .map_err(|e: anyhow::Error| mlua::Error::external(e.to_string()))?;
+                let stream = Arc::new(Mutex::new(
+                    RedactionStream::with_allowed_patterns(engine_ct.clone(), allowed)
+                ));
+
+                // Feed function — called from background thread per chunk
+                let feed_stream = stream.clone();
+                let feed_fn = lua_ct.create_function(move |_, chunk: String| {
+                    let result = match feed_stream.lock() {
+                        Ok(mut s) => s.feed(chunk.as_bytes()),
+                        Err(_) => chunk.into_bytes(),  // poisoned → passthrough
+                    };
+                    Ok(String::from_utf8_lossy(&result).to_string())
+                })?;
+
+                // Finalize function — called by plugin after exec completes
+                let lua_final = lua_ct.clone();
+                let finalize_fn = lua_ct.create_function(move |_, ()| {
+                    let mut s = match stream.lock() {
+                        Ok(s) => s,
+                        Err(_) => {
+                            return Ok((String::new(), mlua::Value::Nil));
+                        }
+                    };
+                    let (final_chunk, stats) = s.finalize();
+                    let stats_table = lua_final.create_table()?;
+                    stats_table.set("bytes_read", stats.bytes_read)?;
+                    stats_table.set("bytes_written", stats.bytes_written)?;
+                    stats_table.set("chunks_processed", stats.chunks_processed)?;
+                    stats_table.set("patterns_found", stats.patterns_found)?;
+                    stats_table.set("errors", stats.errors)?;
+                    Ok((String::from_utf8_lossy(&final_chunk).to_string(), mlua::Value::Table(stats_table)))
+                })?;
+
+                Ok((feed_fn, finalize_fn))
+            },
+        )?;
+        scred_tbl.set("create_transform", create_transform)?;
+
+        // sift.ext.scred.redact(text, opts?) -> string
+        let engine_redact = engine.clone();
+        let name_to_id_redact = name_to_id.clone();
+        let redact_fn = lua.clone().create_function(
+            move |_, (_ctx, text, opts): (Table, String, Option<Table>)| {
+                let allowed = parse_allowed_patterns(opts.as_ref(), &name_to_id_redact)
+                    .map_err(|e: anyhow::Error| mlua::Error::external(e.to_string()))?;
+                let mut stream = RedactionStream::with_allowed_patterns(
+                    engine_redact.clone(), allowed
+                );
+                let _ = stream.feed(text.as_bytes());
+                let (final_chunk, _stats) = stream.finalize();
+                Ok(String::from_utf8_lossy(&final_chunk).to_string())
+            },
+        )?;
+        scred_tbl.set("redact", redact_fn)?;
+
+        ext.set("scred", scred_tbl)?;
+        Ok(())
+    }
+
     /// Register `sift.ext.html` — HTML to Markdown conversion (gated behind `html-md` feature).
     #[cfg(feature = "html-md")]
     fn register_ext_html(&self, ext: &Table) -> Result<()> {
@@ -270,6 +366,41 @@ impl SiftLua {
         ext.set("markdown", md_tbl)?;
         Ok(())
     }
+}
+
+/// Parse redact opts into a set of allowed pattern type IDs.
+/// Empty set = all patterns allowed.
+#[cfg(feature = "scred")]
+fn parse_allowed_patterns(
+    opts: Option<&mlua::Table>,
+    name_to_id: &std::collections::HashMap<&'static str, u16>,
+) -> anyhow::Result<std::collections::HashSet<u16>> {
+    use scred_redactor::pattern_selector::PatternFilter;
+
+    let Some(ref o) = opts else { return Ok(std::collections::HashSet::new()); };
+    let Ok(redact_str) = o.get::<String>("redact") else { return Ok(std::collections::HashSet::new()); };
+    let redact_str = redact_str.trim();
+    if redact_str.is_empty() || redact_str.eq_ignore_ascii_case("ALL") {
+        return Ok(std::collections::HashSet::new());
+    }
+    let mut allowed = std::collections::HashSet::new();
+    for part in redact_str.split(',') {
+        let part = part.trim();
+        if part.is_empty() { continue; }
+        // Try exact name match
+        if let Some(&id) = name_to_id.get(part) {
+            allowed.insert(id);
+            continue;
+        }
+        // Try glob match against pattern names
+        let matcher = PatternFilter::GlobName(part.to_string());
+        for (&name, &id) in name_to_id {
+            if matcher.matches(name, scred_redactor::metadata_cache::RiskTier::Critical) {
+                allowed.insert(id);
+            }
+        }
+    }
+    Ok(allowed)
 }
 
 #[cfg(test)]
@@ -629,6 +760,80 @@ mod tests {
         assert!(
             !matches!(md_val, mlua::Value::Nil),
             "markdown should not be nil when feature enabled"
+        );
+    }
+
+    #[cfg(feature = "scred")]
+    #[test]
+    fn test_scred_is_nil_when_feature_disabled() {
+        let lua = SiftLua::new(None, test_context()).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let ext: Table = sift.get("ext").unwrap();
+        let scred_val: mlua::Value = ext.get("scred").unwrap_or(mlua::Value::Nil);
+        #[cfg(not(feature = "scred"))]
+        assert!(
+            matches!(scred_val, mlua::Value::Nil),
+            "scred should be nil when feature disabled"
+        );
+        #[cfg(feature = "scred")]
+        assert!(
+            !matches!(scred_val, mlua::Value::Nil),
+            "scred should not be nil when feature enabled"
+        );
+    }
+
+    #[cfg(feature = "scred")]
+    #[test]
+    fn test_scred_redact_redacts_aws_key() {
+        let lua = SiftLua::new(None, test_context()).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let ext: Table = sift.get("ext").unwrap();
+        let scred: Table = ext.get("scred").unwrap();
+        let redact: mlua::Function = scred.get("redact").unwrap();
+        let ctx = test_ctx(&lua.lua);
+        let input = "AKIAIOSFODNN7EXAMPLE";
+        let result: String = redact.call((ctx, input, mlua::Value::Nil)).unwrap();
+        assert_eq!(result.len(), input.len(), "redacted output should be same length");
+        assert_ne!(result, input, "AWS key should be redacted");
+        assert!(
+            result.starts_with("AKIA"),
+            "redacted AWS key should preserve prefix, got: {result}"
+        );
+    }
+
+    #[cfg(feature = "scred")]
+    #[test]
+    fn test_scred_redact_passthrough_plain_text() {
+        let lua = SiftLua::new(None, test_context()).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let ext: Table = sift.get("ext").unwrap();
+        let scred: Table = ext.get("scred").unwrap();
+        let redact: mlua::Function = scred.get("redact").unwrap();
+        let ctx = test_ctx(&lua.lua);
+        let input = "hello world this is plain text";
+        let result: String = redact.call((ctx, input, mlua::Value::Nil)).unwrap();
+        assert_eq!(result, input, "plain text should pass through unchanged");
+    }
+
+    #[cfg(feature = "scred")]
+    #[test]
+    fn test_scred_create_transform_returns_functions() {
+        let lua = SiftLua::new(None, test_context()).unwrap();
+        let sift: Table = lua.lua.globals().get("sift").unwrap();
+        let ext: Table = sift.get("ext").unwrap();
+        let scred: Table = ext.get("scred").unwrap();
+        let create_transform: mlua::Function = scred.get("create_transform").unwrap();
+        let ctx = test_ctx(&lua.lua);
+        let result: mlua::MultiValue = create_transform.call((ctx, mlua::Value::Nil)).unwrap();
+        let results: Vec<mlua::Value> = result.into_iter().collect();
+        assert_eq!(results.len(), 2, "create_transform should return 2 functions");
+        assert!(
+            matches!(&results[0], mlua::Value::Function(_)),
+            "first return value should be a function"
+        );
+        assert!(
+            matches!(&results[1], mlua::Value::Function(_)),
+            "second return value should be a function"
         );
     }
 }

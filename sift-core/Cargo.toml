@@ -9,6 +9,7 @@ ignored = ["md-5", "serde", "toon-format", "jaq-parse", "jaq-syn", "jaq-interpre
 
 [features]
 default = []
+scred = ["dep:scred-redactor"]
 xberg = ["dep:xberg", "xberg/pdf", "xberg/tokio-runtime"]
 html-md = ["dep:html-to-markdown-rs"]
 mdmin = ["dep:mdmin"]
@@ -38,6 +39,7 @@ jaq-parse = { workspace = true }
 jaq-syn = { workspace = true }
 jaq-interpret = { workspace = true }
 regex-lite = "0.1"
+scred-redactor = { path = "/Users/jean-christophe.saad-dupuy2/src/github.com/autonomous-toaster/scred/crates/scred-redactor", optional = true }
 similar = "2"
 shlex = "2"
 tokio = { workspace = true }
