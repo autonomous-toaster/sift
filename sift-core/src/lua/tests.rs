@@ -744,8 +744,8 @@ fn test_dispatch_unchanged_nudge() {
             priority = 0,
             pattern = "test-cmd",
             execute = function(ctx, args, stdin)
-                sift.nudge(ctx, "bypass: 'command cat foo.rs'")
-                return { status = "unchanged", message = "[nudge] foo.rs unchanged since last read" }
+                sift.nudge(ctx, "compressed output. raw: command cat foo.rs")
+                return { status = "unchanged", message = "[nudge] foo.rs unchanged — already in your context. command cat foo.rs to re-read." }
             end
         }
     "#;
@@ -754,11 +754,11 @@ fn test_dispatch_unchanged_nudge() {
         .dispatch("test-cmd", &[], None::<mlua::Value>, false, "")
         .unwrap();
     assert!(
-        output.contains("[nudge] foo.rs unchanged since last read"),
+        output.contains("[nudge] foo.rs unchanged — already in your context. command cat foo.rs to re-read."),
         "output: {output}"
     );
     assert!(
-        output.contains("bypass: 'command cat foo.rs'"),
+        output.contains("compressed output. raw: command cat foo.rs"),
         "output: {output}"
     );
     assert_eq!(exit_code, 0);

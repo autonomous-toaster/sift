@@ -50,7 +50,7 @@ fn test_agent_mode_failed_pipeline() {
     cmd.arg("-c").arg("echo hello | grep nonexistent");
     cmd.assert()
         .code(1)
-        .stdout(predicates::str::contains("[nudge] raw:"));
+        .stdout(predicates::str::contains("[nudge] error output saved. raw:"));
 }
 
 #[test]

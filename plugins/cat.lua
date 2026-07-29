@@ -23,7 +23,7 @@ return {
                 return {
                     status = "unchanged",
                     fingerprint = cache_key,
-                    message = "[nudge] piped content unchanged since last read"
+                    message = "[nudge] piped content unchanged — already in your context."
                 }
             end
 
@@ -70,7 +70,7 @@ return {
         -- Compress markdown files via mdmin (level 2, preserve code blocks)
         if sift.ext.markdown ~= nil and (path:match("%.md$") or path:match("%.markdown$")) then
             content = sift.ext.markdown.compress(ctx, content, { level = 2, code_blocks = "preserve", dictionary = true })
-            sift.nudge(ctx, "raw: command cat " .. path)
+            sift.nudge(ctx, "compressed output. raw: command cat " .. path)
         end
 
         -- Compute hash for cache
@@ -81,7 +81,7 @@ return {
             local display_name = path:match("([^/]+)$") or args[1]
             return {
                 status = "unchanged",
-                message = "[nudge] " .. display_name .. " unchanged (cached)\n      (bypass if stale: command cat " .. path .. ")",
+                message = "[nudge] " .. display_name .. " unchanged — already in your context. command cat " .. path .. " to re-read.",
                 raw_bytes = stat.size
             }
         end
@@ -92,7 +92,7 @@ return {
             return {
                 status = "unchanged",
                 fingerprint = cache_key,
-                message = "[nudge] piped content unchanged (cached)"
+                message = "[nudge] piped content unchanged — already in your context."
             }
         end
 

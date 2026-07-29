@@ -21,7 +21,7 @@ return {
 
         local output, stderr, exit_code = sift.exec(ctx, "rtk " .. cmd)
         if exit_code == 0 then
-            sift.nudge(ctx, "raw: command " .. ctx.original_cmd)
+            sift.nudge(ctx, "compressed output. raw: command " .. ctx.original_cmd)
             return {
                 status = "handled",
                 output = output .. stderr,

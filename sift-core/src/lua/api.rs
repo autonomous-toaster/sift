@@ -446,7 +446,7 @@ impl SiftLua {
             let count = recent.iter().filter(|(k, _)| k == &key).count();
             if count >= 3 {
                 result = format!(
-                    "{msg}\n[nudge] (this will keep returning the same result until the file changes on disk)",
+                    "{msg}\n[nudge] Result is stable — file hasn't changed on disk. Same output until it does.",
                 );
             }
         }

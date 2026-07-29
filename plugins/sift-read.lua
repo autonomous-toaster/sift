@@ -166,7 +166,7 @@ return {
                 end
                 return {
                     status = "unchanged",
-                    message = "[nudge] " .. display_name .. " unchanged (cached)\n      (bypass if stale: sift-read --fresh " .. path .. ")",
+                    message = "[nudge] " .. display_name .. " unchanged — already in your context. sift-read --fresh " .. path .. " to re-read.",
                     raw_bytes = stat.size
                 }
             end

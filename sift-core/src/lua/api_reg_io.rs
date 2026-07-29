@@ -323,7 +323,7 @@ fn json_shortest_impl(
         let _ = std::fs::create_dir_all(&tmp_dir);
         let _ = std::fs::write(&nudge_path, raw);
         if let Ok(mut guard) = nudges.lock() {
-            guard.push(format!("raw: command cat {nudge_path_str}"));
+            guard.push(format!("compressed output. raw: command cat {nudge_path_str}"));
         }
     }
 
@@ -548,7 +548,7 @@ impl SiftLua {
                 let path_str = path.display().to_string();
                 let _ = std::fs::write(&path, &content);
                 if let Ok(mut guard) = nudges.lock() {
-                    guard.push(format!("raw: command cat {path_str}"));
+                    guard.push(format!("output saved. raw: command cat {path_str}"));
                 }
                 Ok(path_str)
             },
