@@ -9,21 +9,17 @@ return {
         "Use 'command' prefix to bypass.",
 
     execute = function(ctx, args, stdin)
-        -- Reconstruct the original command
-        local parts = { ctx.command }
-        for i = 1, #args do
-            parts[#parts + 1] = sift.str.shell_quote(ctx, args[i])
-        end
-        local cmd = table.concat(parts, " ")
+        -- Use original command to preserve shell semantics (variable expansion, etc.)
+        local cmd = ctx.original_cmd
 
-        -- Execute the command, capture output
-        local out, stderr, code = sift.exec(ctx, cmd)
+        -- Execute the command silently, capture output
+        local out, stderr, code = sift.exec(ctx, cmd, { silent = true })
         if code ~= 0 or #out == 0 then
             return { status = "passthrough" }
         end
 
-        -- Pipe output through scred for secret redaction
-        local redacted, _, scred_code = sift.exec(ctx, "scred", { stdin = out })
+        -- Pipe output through scred for secret redaction (silent)
+        local redacted, _, scred_code = sift.exec(ctx, "scred", { stdin = out, silent = true })
         if scred_code == 0 then
             sift.nudge(ctx, "raw: command " .. ctx.original_cmd)
             return {
