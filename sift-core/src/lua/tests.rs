@@ -500,6 +500,26 @@ fn test_exec_command_exit_code() {
 }
 
 #[test]
+fn test_exec_command_with_stdin() {
+    let (stdout, stderr, code) = exec_command(
+        "cat",
+        "test",
+        0,
+        None,
+        false,
+        false,
+        Some("hello from stdin".to_string()),
+    )
+    .unwrap();
+    assert!(
+        stdout.contains("hello from stdin"),
+        "stdout should contain stdin data, got: {stdout}"
+    );
+    assert!(stderr.is_empty(), "stderr should be empty, got: {stderr}");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn test_save_output() {
     let session_id = "test-save";
     save_output("echo test", session_id, 1, "test content");

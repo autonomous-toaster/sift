@@ -674,3 +674,45 @@ fn test_curl_plugin_extension_fallback_url_parsing() {
     let cmd = "curl -s 'https://api.example.com/data.json?format=pretty' 2>/dev/null";
     let (_output, _code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
 }
+
+#[test]
+fn test_scred_plugin_echo_fallthrough() {
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    load_plugin_and_register(&mut lua, "scred");
+
+    // Test that echo works through the scred plugin
+    // If scred is not installed, the plugin returns original output
+    let cmd = "echo hello world";
+    let (output, code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+    assert_eq!(code, 0, "echo should succeed, got: {output}");
+    assert!(
+        output.contains("hello world"),
+        "output should contain hello world: {output}"
+    );
+}
+
+#[test]
+fn test_scred_plugin_env_fallthrough() {
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    load_plugin_and_register(&mut lua, "scred");
+
+    // Test that env works through the scred plugin
+    let cmd = "env";
+    let (output, code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+    assert_eq!(code, 0, "env should succeed, got: {output}");
+    assert!(
+        output.len() > 0,
+        "env output should not be empty"
+    );
+}
+
+#[test]
+fn test_scred_plugin_empty_output() {
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    load_plugin_and_register(&mut lua, "scred");
+
+    // Test that echo with no args (empty output) falls through
+    let cmd = "echo -n ''";
+    let (output, code, _plugin) = lua.dispatch_full(cmd, None::<mlua::Value>).unwrap();
+    assert_eq!(code, 0, "echo empty should succeed, got: {output}");
+}

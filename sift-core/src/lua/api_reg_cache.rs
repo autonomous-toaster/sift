@@ -40,6 +40,9 @@ impl SiftLua {
                     .as_ref()
                     .and_then(|t| t.get::<bool>("merge_stderr").ok())
                     .unwrap_or(false);
+                let stdin = opts
+                    .as_ref()
+                    .and_then(|t| t.get::<String>("stdin").ok());
 
                 let (stdout, stderr, exit_code) = exec_command(
                     &cmd,
@@ -48,7 +51,7 @@ impl SiftLua {
                     transform,
                     silent,
                     merge_stderr,
-                    None,
+                    stdin,
                 )?;
                 let combined = format!("{stdout}{stderr}");
                 // On-error save with auto-nudge
