@@ -18,17 +18,12 @@ return {
 
         -- Check if scred extension is available
         if sift.ext ~= nil and sift.ext.scred ~= nil then
-            local transform, finalize = sift.ext.scred.create_transform()
-            local out, stderr, code = sift.exec(ctx, cmd, {
-                transform = transform,
-                silent = true
-            })
-            local final, stats = finalize()
+            local out, stderr, code = sift.exec(ctx, cmd, { silent = true })
+            local redacted = sift.ext.scred.redact(ctx, out)
             return {
                 status = "handled",
-                output = out .. final,
-                exit_code = code,
-                streamed = true
+                output = redacted,
+                exit_code = code
             }
         end
 
@@ -37,8 +32,7 @@ return {
         return {
             status = "handled",
             output = output,
-            exit_code = exit_code,
-            streamed = true
+            exit_code = exit_code
         }
     end
 }
