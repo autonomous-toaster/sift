@@ -48,10 +48,26 @@ const BASH_ENV_VARS: &[(&str, &str)] = &[
     ("GIT_PAGER", "cat"),
 ];
 
+/// Environment variables with `SIFT_` prefix: collected once at startup, injected into all subprocesses
+/// with the prefix stripped. The original `SIFT_*` vars are removed from the child environment.
+static SIFT_ENV_VARS: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
+    std::env::vars()
+        .filter_map(|(key, val)| {
+            key.strip_prefix("SIFT_")
+                .map(|rest| (rest.to_string(), val))
+        })
+        .collect()
+});
+
 /// Apply the standard bash environment to a Command.
 pub(crate) fn apply_bash_env(cmd: &mut std::process::Command) {
     for &(key, val) in BASH_ENV_VARS {
         cmd.env(key, val);
+    }
+    // Inject SIFT_* vars (prefix stripped) and remove the originals from child env
+    for (key, val) in SIFT_ENV_VARS.iter() {
+        cmd.env(key, val);
+        cmd.env_remove(format!("SIFT_{key}"));
     }
 }
 
