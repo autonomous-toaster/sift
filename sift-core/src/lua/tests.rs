@@ -1043,3 +1043,91 @@ fn test_pipeline_epipe_resilience() {
 }
 
 mod tests_cache;
+
+#[cfg(test)]
+mod tests_split_first_command {
+    use crate::lua::api::split_first_command;
+
+    #[test]
+    fn test_semicolon_outside_quotes() {
+        let result = split_first_command("wc -c; echo $?");
+        assert!(result.is_some());
+        let (first, rest) = result.unwrap();
+        assert_eq!(first, "wc -c");
+        assert_eq!(rest, "echo $?");
+    }
+
+    #[test]
+    fn test_and_and_outside_quotes() {
+        let result = split_first_command("cmd1 && cmd2");
+        assert!(result.is_some());
+        let (first, rest) = result.unwrap();
+        assert_eq!(first, "cmd1");
+        assert_eq!(rest, "cmd2");
+    }
+
+    #[test]
+    fn test_or_or_outside_quotes() {
+        let result = split_first_command("false || echo fallback");
+        assert!(result.is_some());
+        let (first, rest) = result.unwrap();
+        assert_eq!(first, "false");
+        assert_eq!(rest, "echo fallback");
+    }
+
+    #[test]
+    fn test_semicolon_inside_single_quotes() {
+        let result = split_first_command("echo 'hello; world'");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_semicolon_inside_double_quotes() {
+        let result = split_first_command("echo \"hello; world\"");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_escaped_semicolon() {
+        let result = split_first_command("echo hello\\; world");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_no_metacharacters() {
+        let result = split_first_command("echo hello world");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_semicolon_with_leading_whitespace() {
+        let result = split_first_command("  wc -c; echo $?");
+        assert!(result.is_some());
+        let (first, rest) = result.unwrap();
+        assert_eq!(first, "wc -c");
+        assert_eq!(rest, "echo $?");
+    }
+
+    #[test]
+    fn test_multiple_semicolons() {
+        let result = split_first_command("cmd1; cmd2; cmd3");
+        assert!(result.is_some());
+        let (first, rest) = result.unwrap();
+        assert_eq!(first, "cmd1");
+        assert_eq!(rest, "cmd2; cmd3");
+    }
+
+    #[test]
+    fn test_pipe_not_split() {
+        // Pipes are handled by split_pipeline, not split_first_command
+        let result = split_first_command("cmd1 | cmd2");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_empty_first_segment() {
+        // Leading metacharacter should return None (empty first segment)
+        let result = split_first_command("; echo hello");
+        assert!(result.is_none());
+    }
+}

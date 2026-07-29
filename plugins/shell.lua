@@ -18,20 +18,22 @@ return {
 
         -- Check if scred extension is available
         if sift.ext ~= nil and sift.ext.scred ~= nil then
-            local out, stderr, code = sift.exec(ctx, cmd, { scred = true, silent = true })
+            local out, stderr, code = sift.exec(ctx, cmd, { scred = true })
             return {
                 status = "handled",
                 output = out,
-                exit_code = code
+                exit_code = code,
+                streamed = true
             }
         end
 
-        -- scred not available — execute normally
+        -- scred not available — execute normally (streamed to avoid double-write)
         local output, stderr, exit_code = sift.exec(ctx, cmd)
         return {
             status = "handled",
             output = output,
-            exit_code = exit_code
+            exit_code = exit_code,
+            streamed = true
         }
     end
 }

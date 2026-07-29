@@ -25,7 +25,8 @@ return {
             return {
                 status = "handled",
                 output = output .. stderr,
-                exit_code = 0
+                exit_code = 0,
+                streamed = true
             }
         end
 

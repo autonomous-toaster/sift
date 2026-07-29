@@ -175,6 +175,61 @@ impl SiftLua {
             return Ok(result);
         }
 
+        // Check for shell metacharacters (;, &&, ||) outside quotes
+        // If found, split on the first metacharacter and use only the first segment
+        // for plugin matching. The rest goes directly to bash.
+        if let Some((first_segment, rest)) = split_first_command(full_cmd) {
+            // Use first segment for plugin matching
+            let has_special = first_segment.contains('\'')
+                || first_segment.contains('"')
+                || first_segment.contains('\\')
+                || first_segment.contains('$');
+            let parts: Vec<String> = if has_special {
+                shlex::split(first_segment)
+                    .unwrap_or_else(|| first_segment.split_whitespace().map(String::from).collect())
+            } else {
+                first_segment.split_whitespace().map(String::from).collect()
+            };
+
+            if parts.is_empty() {
+                // No command in first segment — run entire command via passthrough
+                return Self::execute_passthrough(full_cmd, &[], None, full_cmd);
+            }
+
+            let name = &parts[0];
+            let args: Vec<String> = parts[1..].to_vec();
+
+            // Try to find a plugin for the first segment
+            let entry = self.find_plugin(name, &args);
+            if entry.is_some() && entry.unwrap().patterns.first().map(String::as_str) != Some("*") {
+                // Plugin found — dispatch first segment, then run rest via passthrough
+                let (first_output, first_code, first_plugin) =
+                    self.dispatch_with_redirect(name, &args, stdin, first_segment)?;
+
+                if rest.trim().is_empty() {
+                    return Ok((first_output, first_code, first_plugin));
+                }
+
+                // Run rest via passthrough
+                let (rest_output, rest_code, _) =
+                    Self::execute_passthrough(rest, &[], None, rest)?;
+
+                // Concatenate outputs; use first exit code unless rest fails
+                let combined = if rest_output.is_empty() {
+                    first_output
+                } else if first_output.is_empty() {
+                    rest_output
+                } else {
+                    format!("{}\n{}", first_output.trim_end(), rest_output.trim())
+                };
+                let exit_code = if rest_code != 0 { rest_code } else { first_code };
+                return Ok((combined, exit_code, first_plugin));
+            }
+
+            // No matching plugin — run entire command via passthrough
+            return Self::execute_passthrough(full_cmd, &[], None, full_cmd);
+        }
+
         // Normal dispatch — fast path for simple commands (no quotes/escapes)
         let has_special = full_cmd.contains('\'')
             || full_cmd.contains('"')
@@ -819,6 +874,87 @@ pub fn split_pipeline(input: &str) -> Vec<&str> {
     }
 
     segments
+}
+
+/// Split a command string on shell metacharacters (`;`, `&&`, `||`) outside of quotes.
+///
+/// Returns `Some((first_segment, rest))` if a metacharacter is found outside quotes.
+/// Returns `None` if no metacharacters are found.
+///
+/// The first segment is the command before the first metacharacter.
+/// The rest is everything after the first metacharacter (including the metacharacter itself).
+///
+/// Only splits on metacharacters that appear outside of:
+/// - Single-quoted strings (`'...'`)
+/// - Double-quoted strings (`"..."`)
+/// - After a backslash escape
+///
+/// Does NOT split on `|` (pipes) — those are handled by `split_pipeline()`.
+pub fn split_first_command(input: &str) -> Option<(&str, &str)> {
+    let chars: Vec<char> = input.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
+    while i < len {
+        let c = chars[i];
+
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+
+        if c == '\\' && !in_single_quote {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+
+        if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            i += 1;
+            continue;
+        }
+
+        if c == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            i += 1;
+            continue;
+        }
+
+        if !in_single_quote && !in_double_quote {
+            if c == ';' {
+                let first = input[..i].trim();
+                let rest = input[i + 1..].trim();
+                if !first.is_empty() {
+                    return Some((first, rest));
+                }
+            }
+
+            if c == '&' && i + 1 < len && chars[i + 1] == '&' {
+                let first = input[..i].trim();
+                let rest = input[i + 2..].trim();
+                if !first.is_empty() {
+                    return Some((first, rest));
+                }
+            }
+
+            if c == '|' && i + 1 < len && chars[i + 1] == '|' {
+                let first = input[..i].trim();
+                let rest = input[i + 2..].trim();
+                if !first.is_empty() {
+                    return Some((first, rest));
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    None
 }
 
 /// Parse fd redirect patterns (e.g., `2>&1`, `1>&2`) from args.

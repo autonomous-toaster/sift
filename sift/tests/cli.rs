@@ -100,3 +100,38 @@ fn test_shell_plugin_default_fallback() {
     cmd.arg("-c").arg("whoami");
     cmd.assert().success();
 }
+
+#[test]
+fn test_shell_metachar_semicolon() {
+    // Commands with ; should split on the metacharacter and expand $? correctly
+    let mut cmd = Command::cargo_bin("sift").unwrap();
+    cmd.arg("-c").arg("echo hello; echo \"exit: $?\"");
+    cmd.assert().success().stdout(predicates::str::contains("hello"));
+    cmd.assert().success().stdout(predicates::str::contains("exit: 0"));
+}
+
+#[test]
+fn test_shell_metachar_and() {
+    // Commands with && should split on the metacharacter
+    let mut cmd = Command::cargo_bin("sift").unwrap();
+    cmd.arg("-c").arg("echo first && echo second");
+    cmd.assert().success().stdout(predicates::str::contains("first"));
+    cmd.assert().success().stdout(predicates::str::contains("second"));
+}
+
+#[test]
+fn test_shell_metachar_semicolon_inside_quotes() {
+    // ; inside quotes should not cause a split
+    let mut cmd = Command::cargo_bin("sift").unwrap();
+    cmd.arg("-c").arg("echo \"hello; world\"");
+    cmd.assert().success().stdout(predicates::str::contains("hello; world"));
+}
+
+#[test]
+fn test_shell_metachar_sed_then_echo() {
+    // sed plugin should match the first segment before ;
+    let mut cmd = Command::cargo_bin("sift").unwrap();
+    cmd.arg("-c").arg("echo hello; echo done");
+    cmd.assert().success().stdout(predicates::str::contains("hello"));
+    cmd.assert().success().stdout(predicates::str::contains("done"));
+}
