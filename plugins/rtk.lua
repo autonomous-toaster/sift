@@ -7,7 +7,7 @@ return {
     pattern = { "ls", "tree", "read", "git", "gh", "glab", "aws", "psql",
                 "pnpm", "err", "test", "json", "deps", "find", "diff",
                 "log", "dotnet", "docker", "kubectl", "summary",
-                "init", "wget", "wc", "gain", "cc-economics", "config",
+                "init", "wget", "gain", "cc-economics", "config",
                 "jest", "vitest", "prisma", "tsc", "next", "lint", "smart" },
     append_prompt = "Output from git, docker, ls and other commands is compressed by rtk. " ..
         "Use 'command' prefix to bypass.",
