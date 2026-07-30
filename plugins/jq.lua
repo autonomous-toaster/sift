@@ -61,10 +61,14 @@ return {
             if not ok2 then
                 return { status = "passthrough" }
             end
-            -- decoded is a Lua table (array of values)
+            -- decoded is a Lua table (array of values) or a scalar
             local lines = {}
-            for _, v in ipairs(decoded) do
-                lines[#lines + 1] = tostring(v)
+            if type(decoded) == "table" then
+                for _, v in ipairs(decoded) do
+                    lines[#lines + 1] = tostring(v)
+                end
+            else
+                lines[#lines + 1] = tostring(decoded)
             end
             local raw_output = table.concat(lines, "\n")
             -- Pass through shortest() — non-JSON input returns unchanged
