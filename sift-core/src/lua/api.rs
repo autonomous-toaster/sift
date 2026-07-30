@@ -467,21 +467,28 @@ impl SiftLua {
         args: &[String],
         passthrough_stdin: Option<String>,
         original_cmd: &str,
+        plugin_name: Option<&str>,
     ) -> Result<(String, i32, String)> {
         let (passthrough_output, passthrough_exit_code, _) =
             Self::execute_passthrough(cmd, args, passthrough_stdin, original_cmd)?;
         let raw = i64::try_from(passthrough_output.len()).unwrap_or(i64::MAX);
+        let actual_cmd = if cmd == "command" && !args.is_empty() {
+            args[0].clone()
+        } else {
+            cmd.to_string()
+        };
         self.record_conversation(
-            cmd,
+            &actual_cmd,
             Some(raw),
             Some(raw),
-            Some("command"),
+            plugin_name,
             Some("passthrough"),
-            Some(cmd.to_string()),
+            Some(actual_cmd.clone()),
             None,
             None,
         );
-        Ok((passthrough_output, passthrough_exit_code, "command".to_string()))
+        let reported_plugin = plugin_name.unwrap_or("command").to_string();
+        Ok((passthrough_output, passthrough_exit_code, reported_plugin))
     }
 
     /// Check for burst of unchanged responses and append warning if needed.
@@ -645,7 +652,8 @@ impl SiftLua {
             };
 
         if status == "passthrough" {
-            return self.handle_passthrough_status(cmd, args, passthrough_stdin, original_cmd);
+            let plugin_name = entry.patterns.first().map(String::as_str);
+            return self.handle_passthrough_status(cmd, args, passthrough_stdin, original_cmd, plugin_name);
         }
 
         let final_output = if status == "unchanged" {

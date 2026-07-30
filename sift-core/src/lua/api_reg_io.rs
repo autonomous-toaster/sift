@@ -1,6 +1,7 @@
 use super::api::compact_json;
 use super::SiftLua;
 use crate::classifier::classify;
+use crate::session::ConversationEntry;
 
 use anyhow::Result;
 use jaq_interpret::{FilterT, RcIter};
@@ -656,6 +657,7 @@ pub struct GainReport {
     per_plugin: Vec<PluginGain>,
     commands: Option<Vec<CommandEntry>>,
     top_bypassed: Vec<BypassEntry>,
+    unmatched_entries: Vec<UnmatchedEntry>,
     sequential_dups: Vec<SequentialDup>,
     daily: Vec<DayEntry>,
 }
@@ -687,8 +689,15 @@ pub struct CommandEntry {
 pub struct BypassEntry {
     command: String,
     calls: i64,
-    cache_hits: i64,
-    hit_rate: f64,
+    total_calls: i64,
+    reason: String,
+}
+
+#[derive(serde::Serialize)]
+/// An unmatched command entry (__default__ plugin).
+pub struct UnmatchedEntry {
+    command: String,
+    calls: i64,
 }
 
 #[derive(serde::Serialize)]
@@ -706,6 +715,16 @@ pub struct DayEntry {
     raw_bytes: i64,
     filtered_bytes: i64,
     saved_bytes: i64,
+}
+
+/// Extract the command name (first word) from a conversation entry's command field.
+fn command_name(entry: &ConversationEntry) -> String {
+    entry
+        .command
+        .as_deref()
+        .and_then(|c| c.split_whitespace().next())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 /// Query the session store and generate a gain report.
@@ -728,6 +747,11 @@ pub async fn generate_gain_report(
     let mut first_seen: Option<i64> = None;
     let mut last_seen: Option<i64> = None;
 
+    let mut total_calls_map: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    let mut unmatched_map: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+
     for entry in &entries {
         let plugin = entry
             .plugin_name
@@ -736,6 +760,15 @@ pub async fn generate_gain_report(
         let is_bypass = entry.output_format.as_deref() == Some("passthrough");
         let raw = entry.raw_bytes.unwrap_or(0);
         let filtered = entry.filtered_bytes.unwrap_or(0);
+
+        // Track total calls per command name
+        let cmd_name = command_name(entry);
+        *total_calls_map.entry(cmd_name.clone()).or_insert(0) += 1;
+
+        // Track __default__ entries for unmatched section
+        if plugin == "__default__" {
+            *unmatched_map.entry(cmd_name).or_insert(0) += 1;
+        }
 
         // Track unique session IDs from item_id prefix (before first _)
         if let Some(underscore) = entry.item_id.find('_') {
@@ -815,7 +848,7 @@ pub async fn generate_gain_report(
     let total_saved_tokens = total_saved_bytes / 4;
 
     // Aggregate top bypassed commands
-    let mut bypass_map: std::collections::HashMap<String, (i64, i64)> =
+    let mut bypass_map: std::collections::HashMap<String, (i64, String)> =
         std::collections::HashMap::new();
     for entry in &entries {
         if entry.output_format.as_deref() == Some("passthrough") {
@@ -824,28 +857,34 @@ pub async fn generate_gain_report(
                 Some(c) => c.to_string(),
                 None => "(unknown)".to_string(),
             };
-            let e = bypass_map.entry(cmd).or_insert((0, 0));
+            let reason = match entry.plugin_name.as_deref() {
+                Some("command") => "explicit",
+                _ => "passthrough",
+            };
+            let e = bypass_map.entry(cmd).or_insert((0, String::new()));
             e.0 += 1;
-            if entry.cache_hit.unwrap_or(false) {
-                e.1 += 1;
-            }
+            e.1 = reason.to_string();
         }
     }
     let mut top_bypassed: Vec<BypassEntry> = bypass_map
         .into_iter()
-        .map(|(command, (calls, cache_hits))| BypassEntry {
-            hit_rate: if calls > 0 {
-                cache_hits as f64 / calls as f64
-            } else {
-                0.0
-            },
+        .map(|(command, (calls, reason))| BypassEntry {
+            total_calls: total_calls_map.get(&command).copied().unwrap_or(calls),
             command,
             calls,
-            cache_hits,
+            reason,
         })
         .collect();
     top_bypassed.sort_by_key(|a| std::cmp::Reverse(a.calls));
     top_bypassed.truncate(10);
+
+    // Aggregate unmatched commands (__default__ entries)
+    let mut unmatched_entries: Vec<UnmatchedEntry> = unmatched_map
+        .into_iter()
+        .map(|(command, calls)| UnmatchedEntry { command, calls })
+        .collect();
+    unmatched_entries.sort_by_key(|a| std::cmp::Reverse(a.calls));
+    unmatched_entries.truncate(10);
 
     // Detect sequential duplicates
     let mut sequential_dups: Vec<SequentialDup> = Vec::new();
@@ -931,6 +970,7 @@ pub async fn generate_gain_report(
             None
         },
         top_bypassed,
+        unmatched_entries,
         sequential_dups,
         daily,
     })
@@ -1053,14 +1093,29 @@ pub fn format_gain_report(report: &GainReport, session_id: Option<&str>) -> Stri
         let _ = writeln!(out, "  ─────────────────────────────────────");
         let _ = writeln!(out, "  Top bypassed:");
         for b in &report.top_bypassed {
+            let pct = if b.total_calls > 0 {
+                b.calls * 100 / b.total_calls
+            } else {
+                0
+            };
             let _ = writeln!(
                 out,
-                "    {:30} {:>4} calls, {} cache hits ({:.0}% hit rate)",
+                "    {:12} {:>4}/{:<4} ({:>3}%)  {}",
                 b.command,
                 b.calls,
-                b.cache_hits,
-                b.hit_rate * 100.0
+                b.total_calls,
+                pct,
+                b.reason
             );
+        }
+    }
+
+    // Unmatched commands section (__default__)
+    if !report.unmatched_entries.is_empty() {
+        let _ = writeln!(out, "  ─────────────────────────────────────");
+        let _ = writeln!(out, "  Commands without plugins (via __default__):");
+        for u in &report.unmatched_entries {
+            let _ = writeln!(out, "    {:12} {:>4} calls", u.command, u.calls);
         }
     }
 
