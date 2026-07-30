@@ -303,7 +303,8 @@ fn json_shortest_impl(
     let tmp_dir = std::path::PathBuf::from("/tmp/sift").join(session_id);
     let nudge_path = tmp_dir.join(format!("{ts}_{cmd_count}_raw_original.json"));
     let nudge_path_str = nudge_path.display().to_string();
-    let nudge_msg_len = 8 + 20 + nudge_path_str.len();
+    let nudge_msg = format!("compressed output. raw: command cat {nudge_path_str}");
+    let nudge_msg_len = 8 + nudge_msg.len();
     let nudge_overhead = nudge_msg_len / 4;
     let mut best_idx = 0usize;
     let mut best_cost = candidates[0].1.len() / 4;
@@ -323,7 +324,7 @@ fn json_shortest_impl(
         let _ = std::fs::create_dir_all(&tmp_dir);
         let _ = std::fs::write(&nudge_path, raw);
         if let Ok(mut guard) = nudges.lock() {
-            guard.push(format!("compressed output. raw: command cat {nudge_path_str}"));
+            guard.push(nudge_msg);
         }
     }
 
