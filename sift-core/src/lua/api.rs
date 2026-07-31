@@ -154,22 +154,6 @@ impl SiftLua {
             return self.dispatch_full(&rest, stdin);
         }
 
-        // Handle pushd <dir> && <command>
-        if let Some(rest) = peel_pushd_prefix(full_cmd) {
-            return self.dispatch_full(&rest, stdin);
-        }
-
-        // Handle popd
-        if full_cmd.trim() == "popd" {
-            let prev = std::env::current_dir()
-                .ok()
-                .and_then(|c| c.parent().map(std::path::Path::to_path_buf));
-            if let Some(dir) = prev {
-                let _ = std::env::set_current_dir(&dir);
-            }
-            return Ok((String::new(), 0, "cd".to_string()));
-        }
-
         // Try pipeline optimization
         if let Some(result) = self.try_pipeline(full_cmd)? {
             return Ok(result);
@@ -267,6 +251,22 @@ impl SiftLua {
             Some(s) => s.trim(),
             None => return Ok(None),
         };
+
+        // If the last segment contains && or ; (outside quotes), the pipeline
+        // optimization would break shell state (directory stack, variables, etc.)
+        // because preceding segments run in a separate bash invocation.
+        // Run the full pipeline in bash instead.
+        if has_shell_chain(last_segment) {
+            let full_pipeline = segments.join(" | ");
+            return Ok(Some(self.dispatch(
+                &full_pipeline,
+                &[],
+                None,
+                false,
+                &full_pipeline,
+            )?));
+        }
+
         let last_parts: Vec<String> = shlex::split(last_segment)
             .unwrap_or_else(|| last_segment.split_whitespace().map(String::from).collect());
         if last_parts.is_empty() {
@@ -415,8 +415,19 @@ impl SiftLua {
                 let mut clean_args = args.clone();
                 clean_args.remove(pos);
                 clean_args.remove(pos);
+                // Strip redirect from original_cmd to prevent double-handling
+                // by plugins that use original_cmd (e.g., __default__/shell.lua).
+                // Without this, bash runs 'echo hello > /tmp/file' (writes to file,
+                // stdout empty), then dispatch_with_redirect writes the empty output
+                // to the same file, overwriting it.
+                //
+                // We strip from the original command string (not reconstructed from
+                // parsed args) to preserve all shell semantics — variable expansion,
+                // quoting, escapes, etc. Reconstructing from args with sh_quote()
+                // would wrap $VAR in single quotes, breaking expansion.
+                let clean_cmd = strip_redirect_from_cmd(original_cmd);
                 let (output, exit_code, plugin) =
-                    self.dispatch(name, &clean_args, stdin, merge_stderr, original_cmd)?;
+                    self.dispatch(name, &clean_args, stdin, merge_stderr, &clean_cmd)?;
                 if exit_code == 0 {
                     if append {
                         let _ = std::fs::OpenOptions::new()
@@ -614,6 +625,7 @@ impl SiftLua {
         }
 
         let entry = self.find_entry(cmd, args)?;
+        let plugin_name = entry.patterns.first().map(String::as_str).unwrap_or("unknown");
         let execute: Function = self.lua.registry_value(&entry.execute_fn)?;
         let ctx = self.build_plugin_context(cmd, original_cmd, merge_stderr)?;
 
@@ -1025,17 +1037,137 @@ fn peel_cd_prefix(input: &str) -> Option<String> {
     }
 }
 
+/// Check if a command string contains `&&` or `;` outside of quotes.
+/// Used by `try_pipeline` to detect shell chaining that would break
+/// if preceding pipeline segments run in a separate bash invocation.
+fn has_shell_chain(cmd: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            '\\' if !in_single => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ';' if !in_single && !in_double => return true,
+            '&' if !in_single && !in_double => {
+                // Check for && (not a single & which is background,
+                // and not N>&M which is fd redirect)
+                if i + 1 < bytes.len() && bytes[i + 1] == b'&' {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// If `input` starts with `pushd <dir> && `, change directory and return the rest.
-fn peel_pushd_prefix(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    let re = regex_lite::Regex::new(r"^pushd\s+(.+?)\s*&&\s*(.+)$").ok()?;
-    if let Some(caps) = re.captures(trimmed) {
-        let dir = caps.get(1)?.as_str().trim();
-        let rest = caps.get(2)?.as_str().trim();
-        let _ = std::env::set_current_dir(dir);
-        Some(rest.to_string())
+/// Strip the last unquoted `> file` or `>> file` redirect from a command string.
+/// Preserves all shell semantics (variable expansion, quoting, escapes) by
+/// operating on the original string rather than reconstructing from parsed args.
+fn strip_redirect_from_cmd(cmd: &str) -> String {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut skip_next = false;
+    let mut last_redirect: Option<usize> = None;
+
+    for (i, c) in cmd.char_indices() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if !in_single => {
+                escaped = true;
+            }
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '>' if !in_single && !in_double => {
+                // Skip fd redirects like 2>&1, 1>&2 (N>&M patterns)
+                // These are already stripped from args by parse_fd_redirects,
+                // but original_cmd still contains them.
+                let is_fd_redirect = cmd.as_bytes().get(i + 1).copied() == Some(b'&');
+                if !is_fd_redirect {
+                    last_redirect = Some(i);
+                    // If this is >>, skip the second > so we don't
+                    // record it as a separate redirect.
+                    if cmd.as_bytes().get(i + 1).copied() == Some(b'>') {
+                        skip_next = true;
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    let Some(pos) = last_redirect else {
+        return cmd.to_string();
+    };
+
+    let before = cmd[..pos].trim_end();
+    let after = &cmd[pos..];
+
+    // Skip ">>" or ">"
+    let after = if after.starts_with(">>") {
+        &after[2..]
     } else {
-        None
+        &after[1..]
+    };
+
+    // Skip whitespace before filename
+    let after = after.trim_start();
+
+    // Skip the filename: characters until next unquoted whitespace
+    let mut fn_single = false;
+    let mut fn_double = false;
+    let mut fn_escaped = false;
+    let fn_end = after
+        .char_indices()
+        .find(|&(_, c)| {
+            if fn_escaped {
+                fn_escaped = false;
+                return false;
+            }
+            match c {
+                '\\' if !fn_single => {
+                    fn_escaped = true;
+                    false
+                }
+                '\'' if !fn_double => {
+                    fn_single = !fn_single;
+                    false
+                }
+                '"' if !fn_single => {
+                    fn_double = !fn_double;
+                    false
+                }
+                c if !fn_single && !fn_double && c.is_whitespace() => true,
+                _ => false,
+            }
+        })
+        .map_or(after.len(), |(idx, _)| idx);
+
+    let rest = after[fn_end..].trim_start();
+    if rest.is_empty() {
+        before.to_string()
+    } else {
+        format!("{} {}", before, rest)
     }
 }
 

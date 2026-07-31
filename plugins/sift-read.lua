@@ -1,8 +1,8 @@
--- sift-read.lua — file read plugin with caching, range support, and diff emission (priority 0)
+-- sift-read.lua — file read plugin with caching, range support (priority 0)
 -- Usage: sift-read <path> [<offset> [<limit>]]
 --        sift-read --fresh <path> [<offset> [<limit>]]
 -- Shares cache with cat.lua via file-based content store.
--- Returns "unchanged" on cache hit, unified diff on content change, or full content.
+-- Returns "unchanged" on cache hit, or full content on change with a notification.
 
 return {
     name = "sift-read",
@@ -54,7 +54,7 @@ return {
                 local lines = sift.str.split_lines(ctx, content)
                 content = sift.str.slice_text(ctx, content, offset, #lines)
             end
-            return { status = "handled", output = content, exit_code = 0, raw_bytes = stat.size }
+            return { status = "handled", output = content, exit_code = 0, raw_bytes = stat and stat.size or 0 }
         end
 
         -- Detect MIME type for binary document routing
@@ -78,7 +78,7 @@ return {
                 return {
                     status = "unchanged",
                     message = "[nudge] " .. display_name .. " unchanged (cached)\n      (bypass if stale: sift-read --fresh " .. path .. ")",
-                    raw_bytes = stat.size
+                    raw_bytes = stat and stat.size or 0
                 }
             end
 
@@ -103,7 +103,7 @@ return {
                 status = "handled",
                 output = text,
                 exit_code = 0,
-                raw_bytes = stat.size
+                raw_bytes = stat and stat.size or 0
             }
         end
 
@@ -150,63 +150,43 @@ return {
                 cached = sift.cache.has_range(ctx, hash, range_start, range_end)
             end
             if cached then
-                local display_name = path:match("([^/]+)$") or path
-                if offset or limit then
-                    local msg
-                    if range_start == range_end then
-                        msg = string.format("[nudge] %s line %d unchanged (cached)\n      (bypass if stale: sift-read --fresh %s %d)", display_name, range_start, path, range_start)
-                    else
-                        msg = string.format("[nudge] %s lines %d-%d unchanged (cached)\n      (bypass if stale: sift-read --fresh %s %d %d)", display_name, range_start, range_end, path, range_start, range_end - range_start + 1)
+                -- Mtime check: if file mtime differs from cached mtime, force re-read
+                local current_mtime = stat and stat.mtime
+                local cached_mtime = sift.cache.get_mtime(ctx, hash)
+                if current_mtime and cached_mtime and current_mtime ~= cached_mtime then
+                    -- File modified since cache — fall through to re-read
+                    sift.nudge(ctx, path:match("([^/]+)$") or path .. " mtime changed, re-reading")
+                else
+                    local display_name = path:match("([^/]+)$") or path
+                    if offset or limit then
+                        local msg
+                        if range_start == range_end then
+                            msg = string.format("[nudge] %s line %d unchanged (cached)\n      (bypass if stale: sift-read --fresh %s %d)", display_name, range_start, path, range_start)
+                        else
+                            msg = string.format("[nudge] %s lines %d-%d unchanged (cached)\n      (bypass if stale: sift-read --fresh %s %d %d)", display_name, range_start, range_end, path, range_start, range_end - range_start + 1)
+                        end
+                        return {
+                            status = "unchanged",
+                            message = msg,
+                            raw_bytes = stat and stat.size or 0
+                        }
                     end
                     return {
                         status = "unchanged",
-                        message = msg,
-                        raw_bytes = stat.size
+                        message = "[nudge] " .. display_name .. " unchanged — already in your context. sift-read --fresh " .. path .. " to re-read.",
+                        raw_bytes = stat and stat.size or 0
                     }
                 end
-                return {
-                    status = "unchanged",
-                    message = "[nudge] " .. display_name .. " unchanged — already in your context. sift-read --fresh " .. path .. " to re-read.",
-                    raw_bytes = stat.size
-                }
             end
         end
 
-        -- Cache miss: try to load old content and emit diff
+        -- Cache miss: check if file changed and add a brief notification
+        -- Always return full content (no diff emission — diffs cause agent errors)
         if not fresh then
             local old_hash = sift.cache.get_path_hash(ctx, path)
-            if old_hash then
-                local old_content = sift.cache.load_file(ctx, old_hash)
-                if old_content then
-                    local diff = sift.diff(ctx, old_content, content)
-                    -- Usefulness gate: only emit diff if non-empty and < 90% of full content
-                    if #diff > 0 and #diff < #content * 0.9 then
-                        -- Count changed lines for header
-                        local changed = 0
-                        for line in diff:gmatch("[^\n]+") do
-                            local first = line:sub(1, 1)
-                            if first == "+" or first == "-" then
-                                if line:sub(1, 3) ~= "---" and line:sub(1, 3) ~= "+++" then
-                                    changed = changed + 1
-                                end
-                            end
-                        end
-                        local header = string.format("[sift: %d lines changed of %d]\n", changed, total_lines)
-                        if offset or limit then
-                            sift.cache.store_content(ctx, hash, content)
-                            sift.cache.add_range(ctx, hash, range_start, range_end)
-                        else
-                            sift.cache.store_file(ctx, hash, content)
-                        end
-                        sift.cache.set_path_hash(ctx, path, hash)
-                        return {
-                            status = "handled",
-                            output = header .. diff,
-                            exit_code = 0,
-                            raw_bytes = stat.size
-                        }
-                    end
-                end
+            if old_hash and sift.cache.load_file(ctx, old_hash) then
+                local display_name = path:match("([^/]+)$") or path
+                sift.nudge(ctx, display_name .. " changed since last read")
             end
         end
 
@@ -218,6 +198,10 @@ return {
         else
             -- Full read: store content with full hash marker
             sift.cache.store_file(ctx, hash, content)
+            -- Store mtime for staleness detection
+            if stat and stat.mtime then
+                sift.cache.set_mtime(ctx, hash, stat.mtime)
+            end
         end
         sift.cache.set_path_hash(ctx, path, hash)
 
@@ -230,7 +214,7 @@ return {
             status = "handled",
             output = content,
             exit_code = 0,
-            raw_bytes = stat.size
+            raw_bytes = stat and stat.size or 0
         }
     end
 }

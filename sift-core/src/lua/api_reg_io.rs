@@ -69,22 +69,44 @@ impl SiftLua {
         )?;
         fs.set("read", fs_read)?;
 
-        // fs.write(path, content)
+        // fs.write(path, content) — invalidates path cache on write
         let fs_write =
             self.lua
                 .create_function(|_, (ctx, path, content): (Table, String, String)| {
-                    let _ = ctx;
                     std::fs::write(&path, &content)
                         .map_err(|e| mlua::Error::external(format!("write {path}: {e}")))?;
+                    // Invalidate path cache
+                    if let Ok(session_id) = ctx.get::<String>("session_id") {
+                        if !session_id.is_empty() {
+                            let path_hash = hex::encode(sha2::Sha256::digest(path.as_bytes()));
+                            let marker_path = std::path::PathBuf::from("/tmp/sift")
+                                .join(&session_id)
+                                .join("paths")
+                                .join(&path_hash);
+                            if let Ok(old_hash) = std::fs::read_to_string(&marker_path) {
+                                let old_hash = old_hash.trim().to_string();
+                                let cache_path = std::path::PathBuf::from("/tmp/sift")
+                                    .join(&session_id)
+                                    .join("cache")
+                                    .join(&old_hash);
+                                let _ = std::fs::remove_file(&cache_path);
+                                let object_path = std::path::PathBuf::from("/tmp/sift")
+                                    .join(&session_id)
+                                    .join("objects")
+                                    .join(format!("sha256-{old_hash}.txt"));
+                                let _ = std::fs::remove_file(&object_path);
+                            }
+                            let _ = std::fs::remove_file(&marker_path);
+                        }
+                    }
                     Ok(())
                 })?;
         fs.set("write", fs_write)?;
 
-        // fs.edit(path, edits) — apply multiple disjoint text replacements
+        // fs.edit(path, edits) — apply multiple disjoint text replacements, invalidates path cache
         let fs_edit =
             self.lua
                 .create_function(|_, (ctx, path, edits): (Table, String, Table)| {
-                    let _ = ctx;
                     let mut content = std::fs::read_to_string(&path)
                         .map_err(|e| mlua::Error::external(format!("read {path}: {e}")))?;
                     let num_edits = usize::try_from(
@@ -106,22 +128,57 @@ impl SiftLua {
                     }
                     std::fs::write(&path, &content)
                         .map_err(|e| mlua::Error::external(format!("write {path}: {e}")))?;
+                    // Invalidate path cache
+                    if let Ok(session_id) = ctx.get::<String>("session_id") {
+                        if !session_id.is_empty() {
+                            let path_hash = hex::encode(sha2::Sha256::digest(path.as_bytes()));
+                            let marker_path = std::path::PathBuf::from("/tmp/sift")
+                                .join(&session_id)
+                                .join("paths")
+                                .join(&path_hash);
+                            if let Ok(old_hash) = std::fs::read_to_string(&marker_path) {
+                                let old_hash = old_hash.trim().to_string();
+                                let cache_path = std::path::PathBuf::from("/tmp/sift")
+                                    .join(&session_id)
+                                    .join("cache")
+                                    .join(&old_hash);
+                                let _ = std::fs::remove_file(&cache_path);
+                                let object_path = std::path::PathBuf::from("/tmp/sift")
+                                    .join(&session_id)
+                                    .join("objects")
+                                    .join(format!("sha256-{old_hash}.txt"));
+                                let _ = std::fs::remove_file(&object_path);
+                            }
+                            let _ = std::fs::remove_file(&marker_path);
+                        }
+                    }
                     Ok(())
                 })?;
         fs.set("edit", fs_edit)?;
 
-        // fs.stat(path)
+        // fs.stat(path) — returns nil on error instead of raising
+        // Returns: { size, is_dir, is_file, mtime } where mtime is unix ms
         let fs_stat = self
             .lua
             .create_function(|lua, (ctx, path): (Table, String)| {
                 let _ = ctx;
-                let meta = std::fs::metadata(&path)
-                    .map_err(|e| mlua::Error::external(format!("stat {path}: {e}")))?;
-                let result = lua.create_table()?;
-                result.set("size", meta.len())?;
-                result.set("is_dir", meta.is_dir())?;
-                result.set("is_file", meta.is_file())?;
-                Ok(result)
+                match std::fs::metadata(&path) {
+                    Ok(meta) => {
+                        let result = lua.create_table()?;
+                        result.set("size", meta.len())?;
+                        result.set("is_dir", meta.is_dir())?;
+                        result.set("is_file", meta.is_file())?;
+                        let mtime = meta.modified().ok().and_then(|t| {
+                            t.duration_since(std::time::UNIX_EPOCH).ok()
+                                .map(|d| d.as_millis() as i64)
+                        });
+                        if let Some(ms) = mtime {
+                            result.set("mtime", ms)?;
+                        }
+                        Ok(Some(result))
+                    }
+                    Err(_) => Ok(None),
+                }
             })?;
         fs.set("stat", fs_stat)?;
 

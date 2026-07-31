@@ -729,10 +729,17 @@ fn test_dispatch_full_pipeline_fallback() {
 
 #[test]
 fn test_dispatch_full_popd() {
-    let lua = SiftLua::new(None, test_context()).unwrap();
-    let (output, exit_code, _plugin) = lua.dispatch_full("popd", None::<mlua::Value>).unwrap();
-    assert_eq!(output, "");
-    assert_eq!(exit_code, 0);
+    let mut lua = SiftLua::new(None, test_context()).unwrap();
+    // Load built-in plugins so __default__ is available
+    lua.load_plugin_from_str("bash", include_str!("../../../sift/plugins/bash.lua"))
+        .unwrap();
+    lua.load_plugin_from_str("command", include_str!("../../../sift/plugins/command.lua"))
+        .unwrap();
+    // popd with empty directory stack should fail via bash
+    let result = lua.dispatch_full("popd", None::<mlua::Value>);
+    assert!(result.is_ok(), "popd should not panic: {:?}", result.err());
+    let (_output, exit_code, _plugin) = result.unwrap();
+    assert_ne!(exit_code, 0, "popd with empty stack should fail");
 }
 
 #[test]

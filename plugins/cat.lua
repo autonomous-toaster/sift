@@ -2,6 +2,7 @@
 -- Reads file via sift.fs.read(), caches by hash, returns "unchanged" on cache hit.
 -- Shares cache with sift-read.lua via file-based content store.
 -- Also handles piped stdin: caches by content hash, returns unchanged on repeat.
+-- Passthrough on heredoc syntax or non-existent paths to avoid crashes.
 
 return {
     name = "cat",
@@ -51,6 +52,16 @@ return {
             path = ctx.cwd .. "/" .. path
         end
 
+        -- Passthrough if path contains shell metacharacters (heredoc, redirect, etc.)
+        if path:match("[<>|;&$`]") then
+            return { status = "passthrough" }
+        end
+
+        -- Passthrough if path doesn't exist (avoids crash from sift.fs.stat on non-existent paths)
+        if not sift.fs.exists(ctx, path) then
+            return { status = "passthrough" }
+        end
+
         -- Sensitive path bypass: don't cache
         if sift.str.is_sensitive(ctx, path) then
             local stat = sift.fs.stat(ctx, path)
@@ -58,7 +69,7 @@ return {
             if content == nil then
                 return { status = "error", output = "cat: " .. args[1] .. ": No such file or directory" }
             end
-            return { status = "handled", output = content, exit_code = 0, raw_bytes = stat.size }
+            return { status = "handled", output = content, exit_code = 0, raw_bytes = stat and stat.size or 0 }
         end
 
         local stat = sift.fs.stat(ctx, path)
@@ -78,12 +89,20 @@ return {
 
         -- Check file-based cache first (shared with sift-read)
         if sift.cache.has_file(ctx, hash) then
-            local display_name = path:match("([^/]+)$") or args[1]
-            return {
-                status = "unchanged",
-                message = "[nudge] " .. display_name .. " unchanged — already in your context. command cat " .. path .. " to re-read.",
-                raw_bytes = stat.size
-            }
+            -- Mtime check: if file mtime differs from cached mtime, force re-read
+            local current_mtime = stat and stat.mtime
+            local cached_mtime = sift.cache.get_mtime(ctx, hash)
+            if current_mtime and cached_mtime and current_mtime ~= cached_mtime then
+                -- File modified since cache — fall through to re-read
+                sift.nudge(ctx, (path:match("([^/]+)$") or args[1]) .. " mtime changed, re-reading")
+            else
+                local display_name = path:match("([^/]+)$") or args[1]
+                return {
+                    status = "unchanged",
+                    message = "[nudge] " .. display_name .. " unchanged — already in your context. command cat " .. path .. " to re-read.",
+                    raw_bytes = stat and stat.size or 0
+                }
+            end
         end
 
         -- Also check in-memory cache (for piped stdin compatibility)
@@ -98,13 +117,17 @@ return {
 
         -- Store in both caches
         sift.cache.store_file(ctx, hash, content)
+        -- Store mtime for staleness detection
+        if stat and stat.mtime then
+            sift.cache.set_mtime(ctx, hash, stat.mtime)
+        end
         sift.cache.set(ctx, cache_key)
 
         return {
             status = "handled",
             output = content,
             exit_code = 0,
-            raw_bytes = stat.size
+            raw_bytes = stat and stat.size or 0
         }
     end
 }

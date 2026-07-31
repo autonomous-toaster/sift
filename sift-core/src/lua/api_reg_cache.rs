@@ -326,6 +326,43 @@ impl SiftLua {
                 Ok(())
             })?;
         cache.set("store_file", f)?;
+
+        // sift.cache.set_mtime(ctx, hash, mtime) — store mtime in existing marker
+        let f_mtime = self
+            .lua
+            .create_function(|_, (ctx, hash, mtime): (Table, String, i64)| {
+                let session_id: String = ctx.get("session_id")?;
+                let marker_path = std::path::PathBuf::from("/tmp/sift")
+                    .join(&session_id)
+                    .join("cache")
+                    .join(&hash);
+                let mut marker: serde_json::Value = std::fs::read_to_string(&marker_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                marker["mtime"] = serde_json::json!(mtime);
+                std::fs::write(&marker_path, marker.to_string())
+                    .map_err(|e| mlua::Error::external(format!("set mtime: {e}")))?;
+                Ok(())
+            })?;
+        cache.set("set_mtime", f_mtime)?;
+
+        // sift.cache.get_mtime(ctx, hash) -> number|nil — get stored mtime for a content hash
+        let f_get_mtime = self
+            .lua
+            .create_function(|_, (ctx, hash): (Table, String)| {
+                let session_id: String = ctx.get("session_id")?;
+                let marker_path = std::path::PathBuf::from("/tmp/sift")
+                    .join(&session_id)
+                    .join("cache")
+                    .join(&hash);
+                let mtime: Option<i64> = std::fs::read_to_string(&marker_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .and_then(|v: serde_json::Value| v.get("mtime").and_then(|m| m.as_i64()));
+                Ok(mtime)
+            })?;
+        cache.set("get_mtime", f_get_mtime)?;
         Ok(())
     }
 
@@ -398,6 +435,38 @@ impl SiftLua {
                     .map_or_else(|_| Ok(None), |h| Ok(Some(h.trim().to_string())))
             })?;
         cache.set("get_path_hash", f_get)?;
+
+        // sift.cache.invalidate_path(ctx, path) — remove path hash marker and cached content
+        let f_invalidate = self
+            .lua
+            .create_function(|_, (ctx, path): (Table, String)| {
+                let session_id: String = ctx.get("session_id")?;
+                let path_hash = hex::encode(sha2::Sha256::digest(path.as_bytes()));
+                let marker_path = std::path::PathBuf::from("/tmp/sift")
+                    .join(&session_id)
+                    .join("paths")
+                    .join(&path_hash);
+                // Read the old hash to also remove the content cache entry
+                if let Ok(old_hash) = std::fs::read_to_string(&marker_path) {
+                    let old_hash = old_hash.trim().to_string();
+                    // Remove content cache entry
+                    let cache_path = std::path::PathBuf::from("/tmp/sift")
+                        .join(&session_id)
+                        .join("cache")
+                        .join(&old_hash);
+                    let _ = std::fs::remove_file(&cache_path);
+                    // Remove object file
+                    let object_path = std::path::PathBuf::from("/tmp/sift")
+                        .join(&session_id)
+                        .join("objects")
+                        .join(format!("sha256-{old_hash}.txt"));
+                    let _ = std::fs::remove_file(&object_path);
+                }
+                // Remove path hash marker
+                let _ = std::fs::remove_file(&marker_path);
+                Ok(())
+            })?;
+        cache.set("invalidate_path", f_invalidate)?;
         Ok(())
     }
 

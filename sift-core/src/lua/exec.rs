@@ -88,7 +88,6 @@ pub(crate) fn exec_command(
     stdin: Option<String>,
 ) -> Result<(String, String, i32), mlua::Error> {
     let bash_path = find_real_bash();
-
     // Fast path: no transform, use output() to avoid thread overhead
     if transform.is_none() {
         let mut cmd_process = std::process::Command::new(&bash_path);
